@@ -1,12 +1,145 @@
-import os, uuid, shutil, subprocess, sys
+# app.py
+import os, io, sys, uuid, shutil, subprocess, json
 from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import cv2
+from PIL import Image
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
 app = FastAPI(title="Four-Dot Rectifier")
 
-from fastapi.responses import HTMLResponse
+TMP = Path("/tmp")
+TMP.mkdir(parents=True, exist_ok=True)
 
+# ---------- Utilities ----------
+
+def order_corners_tl_tr_br_bl(pts: np.ndarray) -> np.ndarray:
+    """Order 4 (x,y) points as TL, TR, BR, BL."""
+    pts = np.asarray(pts, dtype=np.float32)
+    s = pts.sum(axis=1)
+    d = np.diff(pts, axis=1).ravel()
+    tl = pts[np.argmin(s)]
+    br = pts[np.argmax(s)]
+    tr = pts[np.argmin(d)]
+    bl = pts[np.argmax(d)]
+    return np.array([tl, tr, br, bl], dtype=np.float32)
+
+def warp_by_corners(image_bgr: np.ndarray,
+                    src_pts_xy: np.ndarray,
+                    width_mm: float,
+                    height_mm: float,
+                    dpi: Optional[float] = 300.0,
+                    margin_mm: float = 10.0,
+                    enforce_axes: bool = True) -> np.ndarray:
+    """Perspective-rectify using 4 source points to a known width×height (mm)."""
+    px_per_mm = (dpi / 25.4) if dpi else 4.0
+    W_rect = int(round(width_mm * px_per_mm))
+    H_rect = int(round(height_mm * px_per_mm))
+    M = int(round(margin_mm * px_per_mm))
+    W = W_rect + 2 * M
+    H = H_rect + 2 * M
+
+    src = order_corners_tl_tr_br_bl(src_pts_xy.astype(np.float32))
+    dst = np.array([
+        [M,         M        ],   # TL
+        [M+W_rect,  M        ],   # TR
+        [M+W_rect,  M+H_rect ],   # BR
+        [M,         M+H_rect ],   # BL
+    ], dtype=np.float32)
+
+    Hmat = cv2.getPerspectiveTransform(src, dst)
+    rect = cv2.warpPerspective(image_bgr, Hmat, (W, H), flags=cv2.INTER_CUBIC)
+
+    if enforce_axes:
+        rect = cv2.resize(rect, (W, H), interpolation=cv2.INTER_CUBIC)
+
+    return rect
+
+def run_cli_rectifier(input_path: Path, output_path: Path, *,
+                      width_mm: float, height_mm: float,
+                      dpi: Optional[float],
+                      corner_frac: Optional[float],
+                      polarity: Optional[str],
+                      enforce_axes: bool,
+                      mask_path: Optional[Path] = None):
+    """
+    Call your existing CLI script (auto mode) safely.
+    Adjust flags here to match your rectify_four_dots_improved.py.
+    """
+    script = "rectify_four_dots_improved.py"  # must be present in the repo root
+    cmd = [
+        sys.executable, script,
+        "--input", str(input_path),
+        "--output", str(output_path),
+        "--width-mm", str(width_mm),
+        "--height-mm", str(height_mm),
+    ]
+    if dpi is not None:
+        cmd += ["--dpi", str(dpi)]
+    if enforce_axes:
+        cmd += ["--enforce-axes"]
+    if corner_frac is not None:
+        cmd += ["--corner-frac", str(corner_frac)]
+    if polarity:
+        cmd += ["--polarity", polarity]
+    if mask_path is not None:
+        cmd += ["--mask", str(mask_path)]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"Rectifier failed.\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+
+# ---------- Routes ----------
+
+@app.get("/")
+def health():
+    return {"ok": True, "routes": ["/rectify (POST)", "/ui", "/ui-manual", "/rectify_manual (POST)"]}
+
+# ---- Auto mode API: calls your existing script ----
+@app.post("/rectify", response_class=FileResponse)
+async def rectify(
+    image: UploadFile = File(..., description="Photo with 4 corner dots"),
+    width_mm: float = Form(...),
+    height_mm: float = Form(...),
+    dpi: Optional[float] = Form(300),
+    corner_frac: Optional[float] = Form(0.22),
+    polarity: Optional[str] = Form("dark"),
+    enforce_axes: bool = Form(True),
+    mask: UploadFile | None = File(None)
+):
+    job = TMP / f"job_{uuid.uuid4().hex}"
+    job.mkdir(parents=True, exist_ok=True)
+    try:
+        in_path = job / "input.jpg"
+        with open(in_path, "wb") as f:
+            f.write(await image.read())
+
+        mask_path = None
+        if mask is not None:
+            mask_path = job / "mask.png"
+            with open(mask_path, "wb") as f:
+                f.write(await mask.read())
+
+        out_path = job / "rectified.png"
+        run_cli_rectifier(
+            in_path, out_path,
+            width_mm=width_mm, height_mm=height_mm, dpi=dpi,
+            corner_frac=corner_frac, polarity=polarity,
+            enforce_axes=enforce_axes, mask_path=mask_path
+        )
+        if not out_path.exists():
+            raise HTTPException(status_code=500, detail="No output produced.")
+        return FileResponse(str(out_path), media_type="image/png", filename="rectified.png")
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        shutil.rmtree(job, ignore_errors=True)
+
+# ---- Simple browser UI for auto mode ----
 @app.get("/ui", response_class=HTMLResponse)
 def ui():
     return """
@@ -14,84 +147,55 @@ def ui():
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Four-Dot Rectifier</title>
+  <title>Four-Dot Rectifier (Auto)</title>
   <style>
-    body{font-family:system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin:2rem; max-width:900px}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; margin:2rem; max-width:900px}
     fieldset{border:1px solid #ddd; padding:1rem}
-    label{display:block; margin:.5rem 0 .25rem}
-    input[type="number"]{width:10rem}
     .row{display:flex; gap:1rem; flex-wrap:wrap}
-    #out{margin-top:1.5rem}
-    img{max-width:100%; height:auto; border:1px solid #ddd}
-    .muted{color:#666; font-size:.9rem}
+    #out img{max-width:100%; height:auto; border:1px solid #ddd}
   </style>
 </head>
 <body>
-  <h1>Four-Dot Rectifier</h1>
+  <h1>Four-Dot Rectifier — Auto</h1>
   <form id="frm">
     <fieldset>
       <legend>Upload</legend>
-      <label>Photo (with 4 corner dots)</label>
       <input type="file" name="image" accept="image/*" required />
     </fieldset>
     <fieldset class="row">
-      <div>
-        <label>Width (mm)</label>
-        <input type="number" step="0.1" name="width_mm" value="381.0" required />
-      </div>
-      <div>
-        <label>Height (mm)</label>
-        <input type="number" step="0.1" name="height_mm" value="228.6" required />
-      </div>
-      <div>
-        <label>DPI (optional)</label>
-        <input type="number" step="1" name="dpi" value="300" />
-      </div>
-      <div>
-        <label>Corner frac</label>
-        <input type="number" step="0.01" min="0.10" max="0.40" name="corner_frac" value="0.22" />
-      </div>
-      <div>
-        <label>Polarity</label>
+      <label>Width (mm)<br><input type="number" step="0.1" name="width_mm" value="381.0" required></label>
+      <label>Height (mm)<br><input type="number" step="0.1" name="height_mm" value="228.6" required></label>
+      <label>DPI<br><input type="number" step="1" name="dpi" value="300"></label>
+      <label>Corner frac<br><input type="number" step="0.01" min="0.10" max="0.40" name="corner_frac" value="0.22"></label>
+      <label>Polarity<br>
         <select name="polarity">
           <option value="dark" selected>dark (black dots)</option>
           <option value="light">light (white dots)</option>
         </select>
-      </div>
-      <div>
-        <label><input type="checkbox" name="enforce_axes" checked /> Enforce axes</label>
-      </div>
+      </label>
+      <label><input type="checkbox" name="enforce_axes" checked> Enforce axes</label>
     </fieldset>
-    <p class="muted">Tip: Width/height for your 11×17″ target with 1″ inset are 381.0 mm × 228.6 mm.</p>
     <button type="submit">Rectify</button>
   </form>
-
-  <div id="out"></div>
+  <div id="out" style="margin-top:1.5rem;"></div>
 
 <script>
 const frm = document.getElementById('frm');
 frm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const fd = new FormData(frm);
-  // Convert checkbox -> true/false string so FastAPI sees it
   fd.set('enforce_axes', frm.enforce_axes.checked ? 'true' : 'false');
-
   const btn = frm.querySelector('button');
   btn.disabled = true; btn.textContent = 'Processing…';
-
   try {
     const res = await fetch('/rectify', { method: 'POST', body: fd });
-    if (!res.ok) {
-      const txt = await res.text();
-      throw new Error('Server error: ' + txt);
-    }
+    if (!res.ok) throw new Error(await res.text());
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     document.getElementById('out').innerHTML =
-      `<h2>Result</h2><a download="rectified.png" href="${url}">Download PNG</a><br/><br/><img src="${url}">`;
+      `<h2>Result</h2><a download="rectified.png" href="${url}">Download PNG</a><br><br><img src="${url}">`;
   } catch (err) {
-    document.getElementById('out').innerHTML =
-      '<p style="color:#b00020;">' + err.message + '</p>';
+    document.getElementById('out').innerHTML = '<p style="color:#b00020;">' + err.message + '</p>';
   } finally {
     btn.disabled = false; btn.textContent = 'Rectify';
   }
@@ -101,87 +205,158 @@ frm.addEventListener('submit', async (e) => {
 </html>
     """
 
-# Where we do temp work on Render (ephemeral disk)
-TMP = Path("/tmp")
-TMP.mkdir(exist_ok=True, parents=True)
+# ---- Manual picker UI (browser canvas) ----
+@app.get("/ui-manual", response_class=HTMLResponse)
+def ui_manual():
+    return """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Four-Dot Rectifier (Manual Picker)</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; margin:2rem; max-width:1000px}
+  #c{max-width:100%; height:auto; cursor: crosshair; border:1px solid #ddd}
+  #pts{margin:.5rem 0; color:#333}
+  button{padding:.5rem 1rem}
+</style>
+</head>
+<body>
+<h1>Four-Dot Rectifier — Manual Picker</h1>
+<form id="frm">
+  <div><input id="file" type="file" name="image" accept="image/*" required></div>
+  <p style="color:#666">Click the four dots in any order; we’ll sort TL,TR,BR,BL automatically.</p>
+  <canvas id="c"></canvas>
+  <div id="pts">Points: (none)</div>
+  <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+    <label>Width (mm) <input type="number" step="0.1" name="width_mm" value="381.0" required></label>
+    <label>Height (mm) <input type="number" step="0.1" name="height_mm" value="228.6" required></label>
+    <label>DPI <input type="number" step="1" name="dpi" value="300"></label>
+    <label>Margin (mm) <input type="number" step="0.1" name="margin_mm" value="10.0"></label>
+    <label><input type="checkbox" name="enforce_axes" checked> Enforce axes</label>
+  </div>
+  <div style="margin-top:0.75rem;">
+    <button type="button" id="undo">Undo</button>
+    <button type="button" id="reset">Reset</button>
+    <button type="submit" id="go" disabled>Rectify</button>
+  </div>
+</form>
+<div id="out" style="margin-top:1rem;"></div>
 
-def run_script(input_path: Path, output_path: Path, *,
-               width_mm: float, height_mm: float, dpi: float | None,
-               corner_frac: float | None, polarity: str | None,
-               enforce_axes: bool, mask_path: Path | None):
+<script>
+const fileInput = document.getElementById('file');
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const ptsDiv = document.getElementById('pts');
+const undoBtn = document.getElementById('undo');
+const resetBtn = document.getElementById('reset');
+const goBtn = document.getElementById('go');
+const outDiv = document.getElementById('out');
+
+let img = new Image();
+let naturalW = 0, naturalH = 0;
+let points = [];
+
+function draw() {
+  if (!naturalW) { canvas.width = 800; canvas.height = 450; ctx.clearRect(0,0,canvas.width,canvas.height); return; }
+  const maxW = Math.min(1000, window.innerWidth - 64);
+  const scale = Math.min(1, maxW / naturalW);
+  const cw = Math.round(naturalW * scale);
+  const ch = Math.round(naturalH * scale);
+  canvas.width = cw; canvas.height = ch;
+  ctx.clearRect(0,0,cw,ch);
+  ctx.drawImage(img, 0, 0, cw, ch);
+  ctx.lineWidth = 2;
+  points.forEach((p, i) => {
+    const sx = p.sx, sy = p.sy;
+    ctx.strokeStyle = "#ffcc00";
+    ctx.beginPath(); ctx.arc(sx, sy, 8, 0, 2*Math.PI); ctx.stroke();
+    ctx.fillStyle = "#e53935";
+    ctx.beginPath(); ctx.arc(sx, sy, 4, 0, 2*Math.PI); ctx.fill();
+    ctx.fillStyle = "#000";
+    ctx.font = "14px system-ui";
+    ctx.fillText(String(i+1), sx + 10, sy - 10);
+  });
+  ptsDiv.textContent = points.length
+    ? ("Points: " + points.map(p => `(${p.x.toFixed(1)}, ${p.y.toFixed(1)})`).join("  "))
+    : "Points: (none)";
+  goBtn.disabled = (points.length !== 4);
+}
+
+fileInput.addEventListener('change', () => {
+  points = []; outDiv.innerHTML = "";
+  const f = fileInput.files[0]; if (!f) return;
+  const url = URL.createObjectURL(f);
+  img.onload = () => { naturalW = img.naturalWidth; naturalH = img.naturalHeight; draw(); };
+  img.src = url;
+});
+
+canvas.addEventListener('click', (e) => {
+  if (!naturalW) return;
+  const rect = canvas.getBoundingClientRect();
+  const sx = e.clientX - rect.left;
+  const sy = e.clientY - rect.top;
+  const scale = canvas.width / naturalW;
+  const x = sx / scale, y = sy / scale;
+  if (points.length < 4) points.push({x, y, sx, sy});
+  else points[3] = {x, y, sx, sy};
+  draw();
+});
+
+undoBtn.addEventListener('click', () => { points.pop(); draw(); });
+resetBtn.addEventListener('click', () => { points = []; draw(); });
+
+document.getElementById('frm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (points.length !== 4) return;
+  const fd = new FormData(e.target);
+  fd.set('enforce_axes', e.target.enforce_axes.checked ? 'true' : 'false');
+  fd.set('points', JSON.stringify(points.map(p => ({x:p.x, y:p.y}))));
+  const btn = document.getElementById('go'); btn.disabled = true; btn.textContent = 'Processing…';
+  outDiv.innerHTML = "";
+  try {
+    const res = await fetch('/rectify_manual', { method: 'POST', body: fd });
+    if (!res.ok) throw new Error(await res.text());
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    outDiv.innerHTML = `<h2>Result</h2><a download="rectified.png" href="${url}">Download PNG</a><br><br><img src="${url}">`;
+  } catch (err) {
+    outDiv.innerHTML = '<p style="color:#b00020;">' + err.message + '</p>';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Rectify';
+  }
+});
+window.addEventListener('resize', draw);
+</script>
+</body>
+</html>
     """
-    Calls your existing CLI script in automatic mode (no GUI).
-    Adjust the flags here to match your script’s options.
-    """
-    cmd = [sys.executable, "rectify_four_dots_improved.py",
-           "--input", str(input_path),
-           "--output", str(output_path),
-           "--width-mm", str(width_mm),
-           "--height-mm", str(height_mm)]
-    if dpi:
-        cmd += ["--dpi", str(dpi)]
-    if enforce_axes:
-        cmd += ["--enforce-axes"]
-    # Optional flags if your script supports them (safe to include if present):
-    if corner_frac:
-        cmd += ["--corner-frac", str(corner_frac)]
-    if polarity:
-        cmd += ["--polarity", polarity]
-    if mask_path is not None:
-        cmd += ["--mask", str(mask_path)]
-    # Never use --manual on a server (no GUI available)
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"rectifier failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
-
-@app.post("/rectify", response_class=FileResponse)
-async def rectify(
-    image: UploadFile = File(..., description="Photo containing the four corner dots"),
-    width_mm: float = Form(..., description="Real width between left/right dots (mm)"),
-    height_mm: float = Form(..., description="Real height between top/bottom dots (mm)"),
-    dpi: float | None = Form(None, description="Output DPI (optional)"),
-    corner_frac: float | None = Form(0.22, description="Corner ROI fraction (e.g., 0.18–0.30)"),
-    polarity: str | None = Form("dark", description="dot color: 'dark' or 'light'"),
-    enforce_axes: bool = Form(True, description="Force exact width×height in output"),
-    mask: UploadFile | None = File(None, description="Optional mask PNG (white=ignore, black=search)")
+# ---- Manual rectification API (uses points from /ui-manual) ----
+@app.post("/rectify_manual")
+async def rectify_manual(
+    image: UploadFile = File(...),
+    points: str = Form(...),             # JSON string: [{x,y}, ...] length 4
+    width_mm: float = Form(...),
+    height_mm: float = Form(...),
+    dpi: Optional[float] = Form(300),
+    margin_mm: Optional[float] = Form(10.0),
+    enforce_axes: bool = Form(True),
 ):
-    # save uploads to /tmp
-    job = TMP / f"job_{uuid.uuid4().hex}"
-    job.mkdir(parents=True, exist_ok=True)
     try:
-        in_path = job / "input.jpg"
-        with open(in_path, "wb") as f:
-            shutil.copyfileobj(image.file, f)
-
-        mask_path = None
-        if mask is not None:
-            mask_path = job / "mask.png"
-            with open(mask_path, "wb") as f:
-                shutil.copyfileobj(mask.file, f)
-
-        out_path = job / "rectified.png"
-
-        run_script(
-            in_path, out_path,
-            width_mm=width_mm, height_mm=height_mm, dpi=dpi,
-            corner_frac=corner_frac, polarity=polarity,
-            enforce_axes=enforce_axes, mask_path=mask_path
-        )
-
-        if not out_path.exists():
-            raise HTTPException(status_code=500, detail="Rectified image not produced")
-        # Return the file; FastAPI will stream it
-        return FileResponse(str(out_path), media_type="image/png", filename="rectified.png")
-    except RuntimeError as e:
+        raw = await image.read()
+        pil = Image.open(io.BytesIO(raw)).convert("RGB")
+        im = np.array(pil)[:, :, ::-1]  # to BGR
+        pts_list = json.loads(points)
+        if not (isinstance(pts_list, list) and len(pts_list) == 4):
+            raise HTTPException(status_code=400, detail="Provide exactly 4 points.")
+        src = np.array([[p["x"], p["y"]] for p in pts_list], dtype=np.float32)
+        rect = warp_by_corners(im, src, width_mm, height_mm, dpi=dpi,
+                               margin_mm=margin_mm or 0.0, enforce_axes=enforce_axes)
+        ok, buf = cv2.imencode(".png", rect)
+        if not ok: raise HTTPException(status_code=500, detail="PNG encode failed")
+        return Response(content=buf.tobytes(), media_type="image/png")
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        # Render’s disks are ephemeral; we can clean up to be nice
-        try:
-            shutil.rmtree(job, ignore_errors=True)
-        except Exception:
-            pass
-
-@app.get("/")
-def health():
-    return {"ok": True, "hint": "POST /rectify with image + form fields"}

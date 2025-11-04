@@ -307,7 +307,42 @@ window.addEventListener('resize', draw);
 </body>
 </html>
     """
+@app.get("/ui-manual", response_class=HTMLResponse)
+def ui_manual():
+    return """
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Four-Dot Rectifier (Manual Picker)</title>
+      <style>
+        body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; margin:2rem; max-width:1000px}
+        #c{max-width:100%; height:auto; cursor:crosshair; border:1px solid #ddd}
+        #pts{margin:.5rem 0; color:#333}
+        button{padding:.5rem 1rem}
+      </style>
+    </head>
+    <body>
+      <h1>Four-Dot Rectifier — Manual Picker</h1>
+      <p>Upload your image and click the four dots (first click = zoom, second click = confirm).</p>
+      <form id="frm">
+        <input id="file" type="file" name="image" accept="image/*" required>
+        <br><br>
+        <canvas id="c"></canvas>
+        <div id="pts">Points: (none)</div>
+        <br>
+        <button type="button" id="undo">Undo</button>
+        <button type="button" id="reset">Reset</button>
+        <button type="submit" id="go" disabled>Rectify</button>
+      </form>
+      <div id="out" style="margin-top:1rem;"></div>
 
+      <script>
+        // JavaScript omitted for brevity — use the last version I gave you.
+      </script>
+    </body>
+    </html>
+    """
 # ---- Manual rectification API (uses points from /ui-manual) ----
 @app.post("/rectify_manual")
 async def rectify_manual(

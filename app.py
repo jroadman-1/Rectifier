@@ -180,70 +180,6 @@ def ui():
   <div id="out" style="margin-top:1.5rem;"></div>
 
 <script>
-const frm = document.getElementById('frm');
-frm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const fd = new FormData(frm);
-  fd.set('enforce_axes', frm.enforce_axes.checked ? 'true' : 'false');
-  const btn = frm.querySelector('button');
-  btn.disabled = true; btn.textContent = 'Processing…';
-  try {
-    const res = await fetch('/rectify', { method: 'POST', body: fd });
-    if (!res.ok) throw new Error(await res.text());
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    document.getElementById('out').innerHTML =
-      `<h2>Result</h2><a download="rectified.png" href="${url}">Download PNG</a><br><br><img src="${url}">`;
-  } catch (err) {
-    document.getElementById('out').innerHTML = '<p style="color:#b00020;">' + err.message + '</p>';
-  } finally {
-    btn.disabled = false; btn.textContent = 'Rectify';
-  }
-});
-</script>
-</body>
-</html>
-    """
-
-# ---- Manual picker UI (browser canvas) ----
-@app.get("/ui-manual", response_class=HTMLResponse)
-def ui_manual():
-    return """
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Four-Dot Rectifier (Manual Picker)</title>
-<style>
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; margin:2rem; max-width:1000px}
-  #c{max-width:100%; height:auto; cursor: crosshair; border:1px solid #ddd}
-  #pts{margin:.5rem 0; color:#333}
-  button{padding:.5rem 1rem}
-</style>
-</head>
-<body>
-<h1>Four-Dot Rectifier — Manual Picker</h1>
-<form id="frm">
-  <div><input id="file" type="file" name="image" accept="image/*" required></div>
-  <p style="color:#666">Click the four dots in any order; we’ll sort TL,TR,BR,BL automatically.</p>
-  <canvas id="c"></canvas>
-  <div id="pts">Points: (none)</div>
-  <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
-    <label>Width (mm) <input type="number" step="0.1" name="width_mm" value="381.0" required></label>
-    <label>Height (mm) <input type="number" step="0.1" name="height_mm" value="228.6" required></label>
-    <label>DPI <input type="number" step="1" name="dpi" value="300"></label>
-    <label>Margin (mm) <input type="number" step="0.1" name="margin_mm" value="10.0"></label>
-    <label><input type="checkbox" name="enforce_axes" checked> Enforce axes</label>
-  </div>
-  <div style="margin-top:0.75rem;">
-    <button type="button" id="undo">Undo</button>
-    <button type="button" id="reset">Reset</button>
-    <button type="submit" id="go" disabled>Rectify</button>
-  </div>
-</form>
-<div id="out" style="margin-top:1rem;"></div>
-
-<script>
 const fileInput = document.getElementById('file');
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -257,8 +193,13 @@ let img = new Image();
 let naturalW = 0, naturalH = 0;
 let points = [];
 
+let zoomMode = false;
+let zoomCenter = null;
+let zoomFactor = 4;   // how much to enlarge local region
+let zoomSize = 150;   // half-size of zoom window in px (on screen)
+
 function draw() {
-  if (!naturalW) { canvas.width = 800; canvas.height = 450; ctx.clearRect(0,0,canvas.width,canvas.height); return; }
+  if (!naturalW) { canvas.width = 800; canvas.height = 450; ctx.clearRect(0,0,800,450); return; }
   const maxW = Math.min(1000, window.innerWidth - 64);
   const scale = Math.min(1, maxW / naturalW);
   const cw = Math.round(naturalW * scale);
@@ -266,9 +207,10 @@ function draw() {
   canvas.width = cw; canvas.height = ch;
   ctx.clearRect(0,0,cw,ch);
   ctx.drawImage(img, 0, 0, cw, ch);
+
   ctx.lineWidth = 2;
   points.forEach((p, i) => {
-    const sx = p.sx, sy = p.sy;
+    const sx = p.x * scale, sy = p.y * scale;
     ctx.strokeStyle = "#ffcc00";
     ctx.beginPath(); ctx.arc(sx, sy, 8, 0, 2*Math.PI); ctx.stroke();
     ctx.fillStyle = "#e53935";
@@ -277,6 +219,27 @@ function draw() {
     ctx.font = "14px system-ui";
     ctx.fillText(String(i+1), sx + 10, sy - 10);
   });
+
+  // draw zoom window if active
+  if (zoomMode && zoomCenter) {
+    const zx = zoomCenter.x, zy = zoomCenter.y;
+    const zw = zoomSize * 2, zh = zoomSize * 2;
+    const sx = zx * scale - zoomSize, sy = zy * scale - zoomSize;
+    ctx.strokeStyle = "#00f";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(sx, sy, zw, zh);
+    ctx.drawImage(
+      img,
+      Math.max(0, zx - (zoomSize / scale)),
+      Math.max(0, zy - (zoomSize / scale)),
+      (zoomSize * 2) / scale,
+      (zoomSize * 2) / scale,
+      20, canvas.height - zw - 20, zw, zh
+    );
+    ctx.strokeStyle = "#000";
+    ctx.strokeRect(20, canvas.height - zw - 20, zw, zh);
+  }
+
   ptsDiv.textContent = points.length
     ? ("Points: " + points.map(p => `(${p.x.toFixed(1)}, ${p.y.toFixed(1)})`).join("  "))
     : "Points: (none)";
@@ -298,13 +261,26 @@ canvas.addEventListener('click', (e) => {
   const sy = e.clientY - rect.top;
   const scale = canvas.width / naturalW;
   const x = sx / scale, y = sy / scale;
-  if (points.length < 4) points.push({x, y, sx, sy});
-  else points[3] = {x, y, sx, sy};
-  draw();
+
+  // first click -> enter zoom mode
+  if (!zoomMode) {
+    zoomMode = true;
+    zoomCenter = {x, y};
+    draw();
+    return;
+  }
+
+  // second click inside zoom window -> confirm point
+  if (zoomMode && zoomCenter) {
+    points.push({x, y});
+    zoomMode = false;
+    zoomCenter = null;
+    draw();
+  }
 });
 
 undoBtn.addEventListener('click', () => { points.pop(); draw(); });
-resetBtn.addEventListener('click', () => { points = []; draw(); });
+resetBtn.addEventListener('click', () => { points = []; zoomMode=false; draw(); });
 
 document.getElementById('frm').addEventListener('submit', async (e) => {
   e.preventDefault();

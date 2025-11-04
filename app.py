@@ -5,6 +5,102 @@ from fastapi.responses import FileResponse
 
 app = FastAPI(title="Four-Dot Rectifier")
 
+from fastapi.responses import HTMLResponse
+
+@app.get("/ui", response_class=HTMLResponse)
+def ui():
+    return """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Four-Dot Rectifier</title>
+  <style>
+    body{font-family:system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin:2rem; max-width:900px}
+    fieldset{border:1px solid #ddd; padding:1rem}
+    label{display:block; margin:.5rem 0 .25rem}
+    input[type="number"]{width:10rem}
+    .row{display:flex; gap:1rem; flex-wrap:wrap}
+    #out{margin-top:1.5rem}
+    img{max-width:100%; height:auto; border:1px solid #ddd}
+    .muted{color:#666; font-size:.9rem}
+  </style>
+</head>
+<body>
+  <h1>Four-Dot Rectifier</h1>
+  <form id="frm">
+    <fieldset>
+      <legend>Upload</legend>
+      <label>Photo (with 4 corner dots)</label>
+      <input type="file" name="image" accept="image/*" required />
+    </fieldset>
+    <fieldset class="row">
+      <div>
+        <label>Width (mm)</label>
+        <input type="number" step="0.1" name="width_mm" value="381.0" required />
+      </div>
+      <div>
+        <label>Height (mm)</label>
+        <input type="number" step="0.1" name="height_mm" value="228.6" required />
+      </div>
+      <div>
+        <label>DPI (optional)</label>
+        <input type="number" step="1" name="dpi" value="300" />
+      </div>
+      <div>
+        <label>Corner frac</label>
+        <input type="number" step="0.01" min="0.10" max="0.40" name="corner_frac" value="0.22" />
+      </div>
+      <div>
+        <label>Polarity</label>
+        <select name="polarity">
+          <option value="dark" selected>dark (black dots)</option>
+          <option value="light">light (white dots)</option>
+        </select>
+      </div>
+      <div>
+        <label><input type="checkbox" name="enforce_axes" checked /> Enforce axes</label>
+      </div>
+    </fieldset>
+    <p class="muted">Tip: Width/height for your 11×17″ target with 1″ inset are 381.0 mm × 228.6 mm.</p>
+    <button type="submit">Rectify</button>
+  </form>
+
+  <div id="out"></div>
+
+<script>
+const frm = document.getElementById('frm');
+frm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(frm);
+  // Convert checkbox -> true/false string so FastAPI sees it
+  fd.set('enforce_axes', frm.enforce_axes.checked ? 'true' : 'false');
+
+  const btn = frm.querySelector('button');
+  btn.disabled = true; btn.textContent = 'Processing…';
+
+  try {
+    const res = await fetch('/rectify', { method: 'POST', body: fd });
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error('Server error: ' + txt);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    document.getElementById('out').innerHTML =
+      `<h2>Result</h2><a download="rectified.png" href="${url}">Download PNG</a><br/><br/><img src="${url}">`;
+  } catch (err) {
+    document.getElementById('out').innerHTML =
+      '<p style="color:#b00020;">' + err.message + '</p>';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Rectify';
+  }
+});
+</script>
+</body>
+</html>
+    """
+
 # Where we do temp work on Render (ephemeral disk)
 TMP = Path("/tmp")
 TMP.mkdir(exist_ok=True, parents=True)

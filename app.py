@@ -1,4 +1,4 @@
-# app_improved.py
+# app_overlay.py
 import os, io, sys, uuid, shutil, subprocess, json
 from pathlib import Path
 from typing import Optional
@@ -54,7 +54,7 @@ def _warp_by_corners(image_bgr, src_pts_xy, width_mm, height_mm, dpi=300.0, marg
 def health():
     return {"ok": True, "routes": ["/ui (GET)", "/rectify (POST)"]}
 
-# ---------- Main UI with HTML overlay markers ----------
+# ---------- Main UI with Google Maps-style pan and zoom ----------
 @app.get("/ui", response_class=HTMLResponse)
 def ui():
     return """
@@ -104,24 +104,57 @@ def ui():
     border-left: 4px solid #2196f3;
   }
   .instructions p {
-    margin: 0;
+    margin: 0.25rem 0;
     color: #1565c0;
+    font-size: 0.9rem;
   }
   .canvas-container {
     position: relative;
     border: 2px solid #ddd;
-    overflow: auto;
-    max-height: 70vh;
+    overflow: hidden;
+    height: 70vh;
     background: #fafafa;
     margin-bottom: 1.5rem;
     display: none;
+    cursor: grab;
   }
   .canvas-container.active {
     display: block;
   }
+  .canvas-container.grabbing {
+    cursor: grabbing;
+  }
+  .canvas-container.crosshair {
+    cursor: crosshair;
+  }
+  
+  kbd {
+    background: #f0f0f0;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-family: monospace;
+    font-size: 0.85em;
+  }
+  
+  /* Wrapper for canvas and markers to align them */
+  #canvasWrapper {
+    position: relative;
+    display: inline-block;
+    transform-origin: 0 0;
+  }
+  
   #canvas {
     display: block;
-    cursor: crosshair;
+  }
+  
+  #markersContainer {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
   }
   
   /* Marker overlay styles */
@@ -177,6 +210,56 @@ def ui():
     text-shadow: 0 1px 3px rgba(0,0,0,0.5);
   }
   
+  /* Zoom controls overlay */
+  .zoom-overlay {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: white;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    display: flex;
+    flex-direction: column;
+    z-index: 1001;
+  }
+  
+  .zoom-overlay button {
+    width: 40px;
+    height: 40px;
+    border: none;
+    background: white;
+    cursor: pointer;
+    font-size: 20px;
+    font-weight: bold;
+    color: #666;
+    transition: background 0.2s;
+  }
+  
+  .zoom-overlay button:hover {
+    background: #f0f0f0;
+  }
+  
+  .zoom-overlay button:first-child {
+    border-radius: 4px 4px 0 0;
+  }
+  
+  .zoom-overlay button:last-child {
+    border-radius: 0 0 4px 4px;
+    border-top: 1px solid #ddd;
+  }
+  
+  .zoom-info {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    background: rgba(255, 255, 255, 0.9);
+    padding: 0.5rem;
+    border-radius: 4px;
+    font-size: 0.875rem;
+    color: #666;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  }
+  
   .points-display {
     padding: 0.75rem;
     background: #f5f5f5;
@@ -216,33 +299,6 @@ def ui():
     align-items: center;
     font-size: 0.875rem;
     color: #333;
-  }
-  .zoom-controls {
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
-  }
-  .zoom-btn {
-    padding: 0.5rem 0.75rem;
-    background: #fff;
-    border: 1px solid #ddd;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 1.125rem;
-    font-weight: bold;
-    transition: background 0.2s;
-  }
-  .zoom-btn:hover {
-    background: #f0f0f0;
-  }
-  .zoom-btn:active {
-    background: #e0e0e0;
-  }
-  .zoom-label {
-    font-size: 0.875rem;
-    color: #666;
-    min-width: 60px;
-    text-align: center;
   }
   button {
     padding: 0.625rem 1.5rem;
@@ -313,12 +369,20 @@ def ui():
     </div>
 
     <div class="instructions">
-      <p><strong>Instructions:</strong> Load an image, then click on each of the 4 corner dots in any order. The image is displayed at 2x size for precision - scroll to navigate.</p>
+      <p><strong>Instructions:</strong> Hold <kbd>Shift</kbd> and click to place each of the 4 corner dots.</p>
+      <p><strong>Navigation:</strong> Mouse wheel to zoom (smooth & slow) • Click and drag to pan • Double-click to zoom in</p>
     </div>
 
     <div class="canvas-container" id="canvasContainer">
-      <canvas id="canvas"></canvas>
-      <div id="markersContainer"></div>
+      <div id="canvasWrapper">
+        <canvas id="canvas"></canvas>
+        <div id="markersContainer"></div>
+      </div>
+      <div class="zoom-overlay">
+        <button type="button" id="zoomInBtn" title="Zoom in">+</button>
+        <button type="button" id="zoomOutBtn" title="Zoom out">−</button>
+      </div>
+      <div class="zoom-info" id="zoomInfo">Zoom: 100%</div>
     </div>
 
     <div class="points-display" id="pointsDisplay">
@@ -352,15 +416,6 @@ def ui():
           Enforce axes
         </label>
       </div>
-
-      <div class="control-group">
-        <label>Image Scale</label>
-        <div class="zoom-controls">
-          <button type="button" class="zoom-btn" id="zoomOut">−</button>
-          <span class="zoom-label" id="zoomLabel">200%</span>
-          <button type="button" class="zoom-btn" id="zoomIn">+</button>
-        </div>
-      </div>
     </div>
 
     <div class="action-buttons">
@@ -378,25 +433,46 @@ const fileInput = document.getElementById('fileInput');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const canvasContainer = document.getElementById('canvasContainer');
+const canvasWrapper = document.getElementById('canvasWrapper');
 const markersContainer = document.getElementById('markersContainer');
 const pointsDisplay = document.getElementById('pointsDisplay');
 const undoBtn = document.getElementById('undoBtn');
 const resetBtn = document.getElementById('resetBtn');
 const submitBtn = document.getElementById('submitBtn');
 const resultDiv = document.getElementById('result');
-const zoomInBtn = document.getElementById('zoomIn');
-const zoomOutBtn = document.getElementById('zoomOut');
-const zoomLabel = document.getElementById('zoomLabel');
+const zoomInBtn = document.getElementById('zoomInBtn');
+const zoomOutBtn = document.getElementById('zoomOutBtn');
+const zoomInfo = document.getElementById('zoomInfo');
 
 let img = new Image();
 let naturalW = 0, naturalH = 0;
 let points = [];
-let scale = 2.0; // Default 2x scale
+let scale = 1.0;
+let panX = 0, panY = 0;
+let isDragging = false;
+let dragStartX = 0, dragStartY = 0;
+let dragMoved = false;
+let shiftHeld = false;
 
-const COLORS = ['#e53935', '#1e88e5', '#43a047', '#fb8c00']; // Red, Blue, Green, Orange
+const COLORS = ['#e53935', '#1e88e5', '#43a047', '#fb8c00'];
+const MIN_SCALE = 0.1;
+const MAX_SCALE = 8.0;
+const ZOOM_STEP = 0.08; // Slower button zoom
+const WHEEL_ZOOM_STEP = 0.025; // Much slower wheel zoom (was 0.05)
+const DRAG_THRESHOLD = 10; // Pixels of movement before it's considered a drag (increased from 3)
 
-function updateZoomLabel() {
-  zoomLabel.textContent = `${Math.round(scale * 100)}%`;
+function updateZoomInfo() {
+  zoomInfo.textContent = `Zoom: ${Math.round(scale * 100)}%`;
+}
+
+function fitImageToContainer() {
+  const containerW = canvasContainer.clientWidth;
+  const containerH = canvasContainer.clientHeight;
+  const scaleW = containerW / naturalW;
+  const scaleH = containerH / naturalH;
+  scale = Math.min(scaleW, scaleH, 1.0) * 0.9; // 90% to add padding
+  panX = (containerW - naturalW * scale) / 2;
+  panY = (containerH - naturalH * scale) / 2;
 }
 
 function drawCanvas() {
@@ -407,31 +483,28 @@ function drawCanvas() {
     return;
   }
 
-  const displayW = Math.round(naturalW * scale);
-  const displayH = Math.round(naturalH * scale);
+  canvas.width = naturalW;
+  canvas.height = naturalH;
   
-  canvas.width = displayW;
-  canvas.height = displayH;
+  canvasWrapper.style.width = naturalW + 'px';
+  canvasWrapper.style.height = naturalH + 'px';
+  canvasWrapper.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
   
-  ctx.clearRect(0, 0, displayW, displayH);
-  ctx.drawImage(img, 0, 0, displayW, displayH);
+  ctx.clearRect(0, 0, naturalW, naturalH);
+  ctx.drawImage(img, 0, 0, naturalW, naturalH);
   
   updateMarkers();
+  updateZoomInfo();
 }
 
 function updateMarkers() {
-  // Clear existing markers
   markersContainer.innerHTML = '';
   
-  // Create HTML overlay markers
   points.forEach((p, i) => {
-    const x = p.x * scale;
-    const y = p.y * scale;
-    
     const marker = document.createElement('div');
     marker.className = 'marker';
-    marker.style.left = x + 'px';
-    marker.style.top = y + 'px';
+    marker.style.left = p.x + 'px';
+    marker.style.top = p.y + 'px';
     
     marker.innerHTML = `
       <div class="marker-outer"></div>
@@ -459,6 +532,35 @@ function updatePointsDisplay() {
   submitBtn.disabled = (count !== 4);
 }
 
+function screenToCanvas(screenX, screenY) {
+  const rect = canvasWrapper.getBoundingClientRect();
+  const x = (screenX - rect.left) / scale;
+  const y = (screenY - rect.top) / scale;
+  return { x, y };
+}
+
+function zoomAtPoint(zoomIn, mouseX, mouseY, step = ZOOM_STEP) {
+  const oldScale = scale;
+  const newScale = zoomIn 
+    ? Math.min(scale + step, MAX_SCALE)
+    : Math.max(scale - step, MIN_SCALE);
+  
+  if (oldScale === newScale) return;
+  
+  // Get the point on the canvas under the mouse BEFORE zoom
+  const canvasX = (mouseX - panX) / oldScale;
+  const canvasY = (mouseY - panY) / oldScale;
+  
+  // Apply new scale
+  scale = newScale;
+  
+  // Adjust pan so the same canvas point stays under the mouse AFTER zoom
+  panX = mouseX - canvasX * newScale;
+  panY = mouseY - canvasY * newScale;
+  
+  drawCanvas();
+}
+
 fileInput.addEventListener('change', () => {
   points = [];
   resultDiv.innerHTML = '';
@@ -470,38 +572,110 @@ fileInput.addEventListener('change', () => {
     naturalW = img.naturalWidth;
     naturalH = img.naturalHeight;
     canvasContainer.classList.add('active');
+    fitImageToContainer();
     drawCanvas();
   };
   img.src = url;
 });
 
-canvas.addEventListener('click', (e) => {
-  if (!naturalW || points.length >= 4) return;
+// Shift key tracking for crosshair cursor
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Shift' && !shiftHeld) {
+    shiftHeld = true;
+    if (canvasContainer.classList.contains('active')) {
+      canvasContainer.classList.add('crosshair');
+    }
+  }
+});
+
+document.addEventListener('keyup', (e) => {
+  if (e.key === 'Shift') {
+    shiftHeld = false;
+    canvasContainer.classList.remove('crosshair');
+  }
+});
+
+canvasContainer.addEventListener('mousedown', (e) => {
+  isDragging = true;
+  dragMoved = false;
+  dragStartX = e.clientX - panX;
+  dragStartY = e.clientY - panY;
+  canvasContainer.classList.add('grabbing');
+});
+
+canvasContainer.addEventListener('mousemove', (e) => {
+  if (!isDragging) return;
   
-  const rect = canvas.getBoundingClientRect();
-  const scrollLeft = canvasContainer.scrollLeft;
-  const scrollTop = canvasContainer.scrollTop;
+  const deltaX = Math.abs(e.clientX - panX - dragStartX);
+  const deltaY = Math.abs(e.clientY - panY - dragStartY);
   
-  const canvasX = e.clientX - rect.left + scrollLeft;
-  const canvasY = e.clientY - rect.top + scrollTop;
+  if (deltaX > DRAG_THRESHOLD || deltaY > DRAG_THRESHOLD) {
+    dragMoved = true;
+  }
   
-  // Convert from display coordinates to natural image coordinates
-  const x = canvasX / scale;
-  const y = canvasY / scale;
+  panX = e.clientX - dragStartX;
+  panY = e.clientY - dragStartY;
+  drawCanvas();
+});
+
+canvasContainer.addEventListener('mouseup', (e) => {
+  canvasContainer.classList.remove('grabbing');
   
-  points.push({ x, y });
-  updateMarkers();
+  // Only place marker if: not dragging, shift was held, and we have room for more points
+  if (!dragMoved && shiftHeld && naturalW && points.length < 4) {
+    const coords = screenToCanvas(e.clientX, e.clientY);
+    if (coords.x >= 0 && coords.x <= naturalW && coords.y >= 0 && coords.y <= naturalH) {
+      points.push(coords);
+      updateMarkers();
+    }
+  }
   
-  // Auto-scroll to center the newly added point
-  const containerRect = canvasContainer.getBoundingClientRect();
-  const scrollToX = canvasX - containerRect.width / 2;
-  const scrollToY = canvasY - containerRect.height / 2;
+  isDragging = false;
+});
+
+canvasContainer.addEventListener('mouseleave', () => {
+  isDragging = false;
+  canvasContainer.classList.remove('grabbing');
+});
+
+canvasContainer.addEventListener('dblclick', (e) => {
+  if (!naturalW) return;
   
-  canvasContainer.scrollTo({
-    left: Math.max(0, scrollToX),
-    top: Math.max(0, scrollToY),
-    behavior: 'smooth'
-  });
+  // Get mouse position relative to container
+  const rect = canvasContainer.getBoundingClientRect();
+  const mouseX = e.clientX - rect.left;
+  const mouseY = e.clientY - rect.top;
+  
+  zoomAtPoint(true, mouseX, mouseY);
+});
+
+canvasContainer.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  if (!naturalW) return;
+  
+  // Get mouse position relative to container
+  const rect = canvasContainer.getBoundingClientRect();
+  const mouseX = e.clientX - rect.left;
+  const mouseY = e.clientY - rect.top;
+  
+  const zoomIn = e.deltaY < 0;
+  zoomAtPoint(zoomIn, mouseX, mouseY, WHEEL_ZOOM_STEP);
+});
+
+zoomInBtn.addEventListener('click', () => {
+  if (!naturalW) return;
+  // Zoom toward center of visible viewport
+  const centerX = canvasContainer.clientWidth / 2;
+  const centerY = canvasContainer.clientHeight / 2;
+  zoomAtPoint(true, centerX, centerY);
+});
+
+zoomOutBtn.addEventListener('click', () => {
+  if (!naturalW) return;
+  // Zoom from center of visible viewport
+  const centerX = canvasContainer.clientWidth / 2;
+  const centerY = canvasContainer.clientHeight / 2;
+  zoomAtPoint(false, centerX, centerY);
 });
 
 undoBtn.addEventListener('click', () => {
@@ -512,22 +686,6 @@ undoBtn.addEventListener('click', () => {
 resetBtn.addEventListener('click', () => {
   points = [];
   updateMarkers();
-});
-
-zoomInBtn.addEventListener('click', () => {
-  if (scale < 4.0) {
-    scale += 0.5;
-    drawCanvas();
-    updateZoomLabel();
-  }
-});
-
-zoomOutBtn.addEventListener('click', () => {
-  if (scale > 0.5) {
-    scale -= 0.5;
-    drawCanvas();
-    updateZoomLabel();
-  }
 });
 
 document.getElementById('form').addEventListener('submit', async (e) => {
@@ -571,8 +729,6 @@ document.getElementById('form').addEventListener('submit', async (e) => {
     submitBtn.textContent = 'Rectify Image';
   }
 });
-
-updateZoomLabel();
 </script>
 </body>
 </html>
@@ -582,7 +738,7 @@ updateZoomLabel();
 @app.post("/rectify")
 async def rectify(
     image: UploadFile = File(...),
-    points: str = Form(...),             # JSON [{x,y}, ...] length=4
+    points: str = Form(...),
     width_mm: float = Form(...),
     height_mm: float = Form(...),
     dpi: Optional[float] = Form(300),
@@ -595,7 +751,7 @@ async def rectify(
 
         raw = await image.read()
         pil = Image.open(io.BytesIO(raw)).convert("RGB")
-        im = np.array(pil)[:, :, ::-1]  # to BGR
+        im = np.array(pil)[:, :, ::-1]
 
         pts_list = json.loads(points)
         if not (isinstance(pts_list, list) and len(pts_list) == 4):

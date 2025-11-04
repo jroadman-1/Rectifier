@@ -360,27 +360,39 @@ function drawCanvas() {
   ctx.clearRect(0, 0, displayW, displayH);
   ctx.drawImage(img, 0, 0, displayW, displayH);
 
-  // Draw points
+  // Draw points with shadow for visibility
   points.forEach((p, i) => {
     const x = p.x * scale;
     const y = p.y * scale;
     
-    // Outer circle (white border)
+    // Shadow for depth
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+    ctx.shadowBlur = 8;
+    ctx.shadowOffsetX = 2;
+    ctx.shadowOffsetY = 2;
+    
+    // Outer circle (white border) - larger
     ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 4;
+    ctx.lineWidth = 6;
     ctx.beginPath();
-    ctx.arc(x, y, 12, 0, 2 * Math.PI);
+    ctx.arc(x, y, 18, 0, 2 * Math.PI);
     ctx.stroke();
     
-    // Inner circle (colored)
+    // Inner circle (colored) - larger
     ctx.fillStyle = COLORS[i];
     ctx.beginPath();
-    ctx.arc(x, y, 10, 0, 2 * Math.PI);
+    ctx.arc(x, y, 15, 0, 2 * Math.PI);
     ctx.fill();
     
-    // Label
+    // Reset shadow for text
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+    
+    // Label with background for readability
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 14px system-ui';
+    ctx.font = 'bold 18px system-ui';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(String(i + 1), x, y);

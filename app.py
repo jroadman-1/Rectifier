@@ -54,7 +54,7 @@ def _warp_by_corners(image_bgr, src_pts_xy, width_mm, height_mm, dpi=300.0, marg
 def health():
     return {"ok": True, "routes": ["/ui (GET)", "/rectify (POST)"]}
 
-# ---------- Main UI with scrollable canvas ----------
+# ---------- Main UI with HTML overlay markers ----------
 @app.get("/ui", response_class=HTMLResponse)
 def ui():
     return """
@@ -123,6 +123,60 @@ def ui():
     display: block;
     cursor: crosshair;
   }
+  
+  /* Marker overlay styles */
+  .marker {
+    position: absolute;
+    width: 60px;
+    height: 60px;
+    margin-left: -30px;
+    margin-top: -30px;
+    pointer-events: none;
+    z-index: 1000;
+    animation: markerPulse 0.5s ease-out;
+  }
+  
+  @keyframes markerPulse {
+    0% { transform: scale(0); }
+    50% { transform: scale(1.3); }
+    100% { transform: scale(1); }
+  }
+  
+  .marker-outer {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 50px;
+    height: 50px;
+    margin-left: -25px;
+    margin-top: -25px;
+    border-radius: 50%;
+    border: 4px solid white;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+  
+  .marker-inner {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 40px;
+    height: 40px;
+    margin-left: -20px;
+    margin-top: -20px;
+    border-radius: 50%;
+  }
+  
+  .marker-label {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: white;
+    font-weight: bold;
+    font-size: 20px;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+  }
+  
   .points-display {
     padding: 0.75rem;
     background: #f5f5f5;
@@ -264,6 +318,7 @@ def ui():
 
     <div class="canvas-container" id="canvasContainer">
       <canvas id="canvas"></canvas>
+      <div id="markersContainer"></div>
     </div>
 
     <div class="points-display" id="pointsDisplay">
@@ -323,6 +378,7 @@ const fileInput = document.getElementById('fileInput');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const canvasContainer = document.getElementById('canvasContainer');
+const markersContainer = document.getElementById('markersContainer');
 const pointsDisplay = document.getElementById('pointsDisplay');
 const undoBtn = document.getElementById('undoBtn');
 const resetBtn = document.getElementById('resetBtn');
@@ -359,55 +415,33 @@ function drawCanvas() {
   
   ctx.clearRect(0, 0, displayW, displayH);
   ctx.drawImage(img, 0, 0, displayW, displayH);
-
-  console.log('Drawing', points.length, 'points');
   
-  // Draw points with shadow for visibility - EXTRA LARGE
+  updateMarkers();
+}
+
+function updateMarkers() {
+  // Clear existing markers
+  markersContainer.innerHTML = '';
+  
+  // Create HTML overlay markers
   points.forEach((p, i) => {
     const x = p.x * scale;
     const y = p.y * scale;
     
-    console.log(`Drawing point ${i+1} at screen coords:`, x, y);
+    const marker = document.createElement('div');
+    marker.className = 'marker';
+    marker.style.left = x + 'px';
+    marker.style.top = y + 'px';
     
-    // Shadow for depth
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.7)';
-    ctx.shadowBlur = 15;
-    ctx.shadowOffsetX = 4;
-    ctx.shadowOffsetY = 4;
+    marker.innerHTML = `
+      <div class="marker-outer"></div>
+      <div class="marker-inner" style="background-color: ${COLORS[i]}"></div>
+      <div class="marker-label">${i + 1}</div>
+    `;
     
-    // Draw a bright yellow background circle first (even bigger)
-    ctx.fillStyle = '#ffff00';
-    ctx.beginPath();
-    ctx.arc(x, y, 35, 0, 2 * Math.PI);
-    ctx.fill();
-    
-    // Outer circle (white border) - MUCH larger
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 8;
-    ctx.beginPath();
-    ctx.arc(x, y, 30, 0, 2 * Math.PI);
-    ctx.stroke();
-    
-    // Inner circle (colored) - MUCH larger
-    ctx.fillStyle = COLORS[i];
-    ctx.beginPath();
-    ctx.arc(x, y, 25, 0, 2 * Math.PI);
-    ctx.fill();
-    
-    // Reset shadow for text
-    ctx.shadowColor = 'transparent';
-    ctx.shadowBlur = 0;
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 0;
-    
-    // Label with background for readability - LARGER
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 24px system-ui';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(String(i + 1), x, y);
+    markersContainer.appendChild(marker);
   });
-
+  
   updatePointsDisplay();
 }
 
@@ -455,25 +489,29 @@ canvas.addEventListener('click', (e) => {
   const x = canvasX / scale;
   const y = canvasY / scale;
   
-  console.log('Click at canvas coords:', canvasX, canvasY);
-  console.log('Converted to image coords:', x, y);
-  console.log('Scale:', scale);
-  
   points.push({ x, y });
-  console.log('Points array:', points);
+  updateMarkers();
   
-  drawCanvas();
-  console.log('drawCanvas() called, should see marker now');
+  // Auto-scroll to center the newly added point
+  const containerRect = canvasContainer.getBoundingClientRect();
+  const scrollToX = canvasX - containerRect.width / 2;
+  const scrollToY = canvasY - containerRect.height / 2;
+  
+  canvasContainer.scrollTo({
+    left: Math.max(0, scrollToX),
+    top: Math.max(0, scrollToY),
+    behavior: 'smooth'
+  });
 });
 
 undoBtn.addEventListener('click', () => {
   points.pop();
-  drawCanvas();
+  updateMarkers();
 });
 
 resetBtn.addEventListener('click', () => {
   points = [];
-  drawCanvas();
+  updateMarkers();
 });
 
 zoomInBtn.addEventListener('click', () => {

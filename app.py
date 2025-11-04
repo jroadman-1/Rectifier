@@ -360,28 +360,38 @@ function drawCanvas() {
   ctx.clearRect(0, 0, displayW, displayH);
   ctx.drawImage(img, 0, 0, displayW, displayH);
 
-  // Draw points with shadow for visibility
+  console.log('Drawing', points.length, 'points');
+  
+  // Draw points with shadow for visibility - EXTRA LARGE
   points.forEach((p, i) => {
     const x = p.x * scale;
     const y = p.y * scale;
     
-    // Shadow for depth
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
-    ctx.shadowBlur = 8;
-    ctx.shadowOffsetX = 2;
-    ctx.shadowOffsetY = 2;
+    console.log(`Drawing point ${i+1} at screen coords:`, x, y);
     
-    // Outer circle (white border) - larger
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 6;
+    // Shadow for depth
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.7)';
+    ctx.shadowBlur = 15;
+    ctx.shadowOffsetX = 4;
+    ctx.shadowOffsetY = 4;
+    
+    // Draw a bright yellow background circle first (even bigger)
+    ctx.fillStyle = '#ffff00';
     ctx.beginPath();
-    ctx.arc(x, y, 18, 0, 2 * Math.PI);
+    ctx.arc(x, y, 35, 0, 2 * Math.PI);
+    ctx.fill();
+    
+    // Outer circle (white border) - MUCH larger
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 8;
+    ctx.beginPath();
+    ctx.arc(x, y, 30, 0, 2 * Math.PI);
     ctx.stroke();
     
-    // Inner circle (colored) - larger
+    // Inner circle (colored) - MUCH larger
     ctx.fillStyle = COLORS[i];
     ctx.beginPath();
-    ctx.arc(x, y, 15, 0, 2 * Math.PI);
+    ctx.arc(x, y, 25, 0, 2 * Math.PI);
     ctx.fill();
     
     // Reset shadow for text
@@ -390,9 +400,9 @@ function drawCanvas() {
     ctx.shadowOffsetX = 0;
     ctx.shadowOffsetY = 0;
     
-    // Label with background for readability
+    // Label with background for readability - LARGER
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 18px system-ui';
+    ctx.font = 'bold 24px system-ui';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(String(i + 1), x, y);
@@ -445,8 +455,15 @@ canvas.addEventListener('click', (e) => {
   const x = canvasX / scale;
   const y = canvasY / scale;
   
+  console.log('Click at canvas coords:', canvasX, canvasY);
+  console.log('Converted to image coords:', x, y);
+  console.log('Scale:', scale);
+  
   points.push({ x, y });
+  console.log('Points array:', points);
+  
   drawCanvas();
+  console.log('drawCanvas() called, should see marker now');
 });
 
 undoBtn.addEventListener('click', () => {

@@ -458,8 +458,9 @@ const COLORS = ['#e53935', '#1e88e5', '#43a047', '#fb8c00'];
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 8.0;
 const ZOOM_STEP = 0.08; // Slower button zoom
-const WHEEL_ZOOM_STEP = 0.025; // Much slower wheel zoom (was 0.05)
-const DRAG_THRESHOLD = 10; // Pixels of movement before it's considered a drag (increased from 3)
+const WHEEL_ZOOM_IN_STEP = 0.025; // Slow zoom in for precision
+const WHEEL_ZOOM_OUT_STEP = 0.05; // Faster zoom out for navigation
+const DRAG_THRESHOLD = 10; // Pixels of movement before it's considered a drag
 
 function updateZoomInfo() {
   zoomInfo.textContent = `Zoom: ${Math.round(scale * 100)}%`;
@@ -659,7 +660,8 @@ canvasContainer.addEventListener('wheel', (e) => {
   const mouseY = e.clientY - rect.top;
   
   const zoomIn = e.deltaY < 0;
-  zoomAtPoint(zoomIn, mouseX, mouseY, WHEEL_ZOOM_STEP);
+  const step = zoomIn ? WHEEL_ZOOM_IN_STEP : WHEEL_ZOOM_OUT_STEP;
+  zoomAtPoint(zoomIn, mouseX, mouseY, step);
 });
 
 zoomInBtn.addEventListener('click', () => {

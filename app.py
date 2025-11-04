@@ -1,4 +1,4 @@
-# app.py
+# app_improved.py
 import os, io, sys, uuid, shutil, subprocess, json
 from pathlib import Path
 from typing import Optional
@@ -11,7 +11,7 @@ app = FastAPI(title="Four-Dot Rectifier")
 TMP = Path("/tmp")
 TMP.mkdir(parents=True, exist_ok=True)
 
-# ------------- Helpers (lightweight; heavy imports happen inside functions) -------------
+# ------------- Helpers -------------
 
 def _order_corners_tl_tr_br_bl_np(pts_xy):
     """Order 4 points as TL, TR, BR, BL using sums and diffs."""
@@ -48,309 +48,472 @@ def _warp_by_corners(image_bgr, src_pts_xy, width_mm, height_mm, dpi=300.0, marg
         rect = cv2.resize(rect, (W, H), interpolation=cv2.INTER_CUBIC)
     return rect
 
-def _run_cli_rectifier(input_path: Path, output_path: Path, *,
-                       width_mm: float, height_mm: float,
-                       dpi: Optional[float],
-                       corner_frac: Optional[float],
-                       polarity: Optional[str],
-                       enforce_axes: bool,
-                       mask_path: Optional[Path] = None):
-    """
-    Calls your existing CLI script in AUTO mode.
-    Ensure 'rectify_four_dots_improved.py' is in the repo root.
-    """
-    script = "rectify_four_dots_improved.py"
-    cmd = [
-        sys.executable, script,
-        "--input", str(input_path),
-        "--output", str(output_path),
-        "--width-mm", str(width_mm),
-        "--height-mm", str(height_mm),
-    ]
-    if dpi is not None:
-        cmd += ["--dpi", str(dpi)]
-    if enforce_axes:
-        cmd += ["--enforce-axes"]
-    if corner_frac is not None:
-        cmd += ["--corner-frac", str(corner_frac)]
-    if polarity:
-        cmd += ["--polarity", polarity]
-    if mask_path is not None:
-        cmd += ["--mask", str(mask_path)]
-
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"Rectifier failed.\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
-
 # --------------------------------- Routes ---------------------------------
 
 @app.get("/")
 def health():
-    return {"ok": True, "routes": ["/ui", "/rectify (POST)", "/ui-manual", "/rectify_manual (POST)"]}
+    return {"ok": True, "routes": ["/ui (GET)", "/rectify (POST)"]}
 
-# ---------- AUTO mode UI ----------
+# ---------- Main UI with scrollable canvas ----------
 @app.get("/ui", response_class=HTMLResponse)
-def ui_auto():
-    return """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Four-Dot Rectifier — Auto</title>
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; margin:2rem; max-width:900px}
-    fieldset{border:1px solid #ddd; padding:1rem}
-    .row{display:flex; gap:1rem; flex-wrap:wrap}
-    #out img{max-width:100%; height:auto; border:1px solid #ddd}
-  </style>
-</head>
-<body>
-  <h1>Four-Dot Rectifier — Auto</h1>
-  <form id="frm">
-    <fieldset>
-      <legend>Upload</legend>
-      <input type="file" name="image" accept="image/*" required />
-    </fieldset>
-    <fieldset class="row">
-      <label>Width (mm)<br><input type="number" step="0.1" name="width_mm" value="381.0" required></label>
-      <label>Height (mm)<br><input type="number" step="0.1" name="height_mm" value="228.6" required></label>
-      <label>DPI<br><input type="number" step="1" name="dpi" value="300"></label>
-      <label>Corner frac<br><input type="number" step="0.01" min="0.10" max="0.40" name="corner_frac" value="0.22"></label>
-      <label>Polarity<br>
-        <select name="polarity">
-          <option value="dark" selected>dark (black dots)</option>
-          <option value="light">light (white dots)</option>
-        </select>
-      </label>
-      <label><input type="checkbox" name="enforce_axes" checked> Enforce axes</label>
-    </fieldset>
-    <button type="submit">Rectify</button>
-  </form>
-  <div id="out" style="margin-top:1.5rem;"></div>
-
-<script>
-const frm = document.getElementById('frm');
-frm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const fd = new FormData(frm);
-  fd.set('enforce_axes', frm.enforce_axes.checked ? 'true' : 'false');
-  const btn = frm.querySelector('button');
-  btn.disabled = true; btn.textContent = 'Processing…';
-  try {
-    const res = await fetch('/rectify', { method: 'POST', body: fd });
-    if (!res.ok) throw new Error(await res.text());
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    document.getElementById('out').innerHTML =
-      `<h2>Result</h2><a download="rectified.png" href="${url}">Download PNG</a><br><br><img src="${url}">`;
-  } catch (err) {
-    document.getElementById('out').innerHTML = '<p style="color:#b00020;">' + err.message + '</p>';
-  } finally {
-    btn.disabled = false; btn.textContent = 'Rectify';
-  }
-});
-</script>
-</body>
-</html>
-    """
-
-# ---------- AUTO mode API (calls your script) ----------
-@app.post("/rectify", response_class=FileResponse)
-async def rectify_auto(
-    image: UploadFile = File(..., description="Photo with 4 corner dots"),
-    width_mm: float = Form(...),
-    height_mm: float = Form(...),
-    dpi: Optional[float] = Form(300),
-    corner_frac: Optional[float] = Form(0.22),
-    polarity: Optional[str] = Form("dark"),
-    enforce_axes: bool = Form(True),
-    mask: UploadFile | None = File(None)
-):
-    job = TMP / f"job_{uuid.uuid4().hex}"
-    job.mkdir(parents=True, exist_ok=True)
-    try:
-        in_path = job / "input.jpg"
-        with open(in_path, "wb") as f:
-            f.write(await image.read())
-
-        mask_path = None
-        if mask is not None:
-            mask_path = job / "mask.png"
-            with open(mask_path, "wb") as f:
-                f.write(await mask.read())
-
-        out_path = job / "rectified.png"
-        _run_cli_rectifier(
-            in_path, out_path,
-            width_mm=width_mm, height_mm=height_mm, dpi=dpi,
-            corner_frac=corner_frac, polarity=polarity,
-            enforce_axes=enforce_axes, mask_path=mask_path
-        )
-        if not out_path.exists():
-            raise HTTPException(status_code=500, detail="No output produced.")
-        return FileResponse(str(out_path), media_type="image/png", filename="rectified.png")
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        shutil.rmtree(job, ignore_errors=True)
-
-# ---------- MANUAL picker UI (canvas with two-click zoom) ----------
-@app.get("/ui-manual", response_class=HTMLResponse)
-def ui_manual():
+def ui():
     return """
 <!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Four-Dot Rectifier — Manual Picker</title>
+<title>Four-Dot Rectifier</title>
 <style>
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; margin:2rem; max-width:1000px}
-  #c{max-width:100%; height:auto; cursor: crosshair; border:1px solid #ddd}
-  #pts{margin:.5rem 0; color:#333}
-  button{padding:.5rem 1rem}
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    margin: 0;
+    padding: 1.5rem;
+    background: #f5f5f5;
+  }
+  .container {
+    max-width: 1400px;
+    margin: 0 auto;
+    background: white;
+    padding: 2rem;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  }
+  h1 {
+    margin: 0 0 1.5rem 0;
+    color: #1a1a1a;
+    font-size: 1.75rem;
+  }
+  .upload-section {
+    margin-bottom: 1.5rem;
+    padding: 1rem;
+    background: #f9f9f9;
+    border: 2px dashed #ddd;
+    border-radius: 4px;
+  }
+  .upload-section input[type="file"] {
+    display: block;
+    width: 100%;
+    padding: 0.5rem;
+  }
+  .instructions {
+    background: #e3f2fd;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+    border-radius: 4px;
+    border-left: 4px solid #2196f3;
+  }
+  .instructions p {
+    margin: 0;
+    color: #1565c0;
+  }
+  .canvas-container {
+    position: relative;
+    border: 2px solid #ddd;
+    overflow: auto;
+    max-height: 70vh;
+    background: #fafafa;
+    margin-bottom: 1.5rem;
+    display: none;
+  }
+  .canvas-container.active {
+    display: block;
+  }
+  #canvas {
+    display: block;
+    cursor: crosshair;
+  }
+  .points-display {
+    padding: 0.75rem;
+    background: #f5f5f5;
+    border-radius: 4px;
+    margin-bottom: 1rem;
+    font-family: monospace;
+    color: #333;
+  }
+  .controls {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    margin-bottom: 1rem;
+  }
+  .control-group {
+    display: flex;
+    flex-direction: column;
+  }
+  .control-group label {
+    font-size: 0.875rem;
+    color: #666;
+    margin-bottom: 0.25rem;
+  }
+  .control-group input[type="number"] {
+    padding: 0.5rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 1rem;
+    width: 120px;
+  }
+  .control-group input[type="checkbox"] {
+    margin-right: 0.5rem;
+  }
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    font-size: 0.875rem;
+    color: #333;
+  }
+  .zoom-controls {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .zoom-btn {
+    padding: 0.5rem 0.75rem;
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 1.125rem;
+    font-weight: bold;
+    transition: background 0.2s;
+  }
+  .zoom-btn:hover {
+    background: #f0f0f0;
+  }
+  .zoom-btn:active {
+    background: #e0e0e0;
+  }
+  .zoom-label {
+    font-size: 0.875rem;
+    color: #666;
+    min-width: 60px;
+    text-align: center;
+  }
+  button {
+    padding: 0.625rem 1.5rem;
+    border: none;
+    border-radius: 4px;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .btn-primary {
+    background: #2196f3;
+    color: white;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: #1976d2;
+  }
+  .btn-secondary {
+    background: #757575;
+    color: white;
+  }
+  .btn-secondary:hover:not(:disabled) {
+    background: #616161;
+  }
+  .btn-danger {
+    background: #f44336;
+    color: white;
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: #d32f2f;
+  }
+  .action-buttons {
+    display: flex;
+    gap: 0.75rem;
+  }
+  #result {
+    margin-top: 2rem;
+  }
+  #result h2 {
+    margin: 0 0 1rem 0;
+    color: #1a1a1a;
+  }
+  #result img {
+    max-width: 100%;
+    height: auto;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+  }
+  .error {
+    padding: 1rem;
+    background: #ffebee;
+    color: #c62828;
+    border-radius: 4px;
+    margin-top: 1rem;
+  }
 </style>
 </head>
 <body>
-<h1>Four-Dot Rectifier — Manual Picker</h1>
-<form id="frm">
-  <div><input id="file" type="file" name="image" accept="image/*" required></div>
-  <p style="color:#666">Click a rough spot to open a zoom window; click again to confirm the dot. Repeat 4 times. Undo/Reset if needed.</p>
-  <canvas id="c"></canvas>
-  <div id="pts">Points: (none)</div>
-  <div style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-top:.75rem;">
-    <label>Width (mm) <input type="number" step="0.1" name="width_mm" value="381.0" required></label>
-    <label>Height (mm) <input type="number" step="0.1" name="height_mm" value="228.6" required></label>
-    <label>DPI <input type="number" step="1" name="dpi" value="300"></label>
-    <label>Margin (mm) <input type="number" step="0.1" name="margin_mm" value="10.0"></label>
-    <label><input type="checkbox" name="enforce_axes" checked> Enforce axes</label>
-  </div>
-  <div style="margin-top:0.75rem;">
-    <button type="button" id="undo">Undo</button>
-    <button type="button" id="reset">Reset</button>
-    <button type="submit" id="go" disabled>Rectify</button>
-  </div>
-</form>
-<div id="out" style="margin-top:1rem;"></div>
+<div class="container">
+  <h1>Four-Dot Rectifier</h1>
+  
+  <form id="form">
+    <div class="upload-section">
+      <input type="file" id="fileInput" name="image" accept="image/*" required>
+    </div>
+
+    <div class="instructions">
+      <p><strong>Instructions:</strong> Load an image, then click on each of the 4 corner dots in any order. The image is displayed at 2x size for precision - scroll to navigate.</p>
+    </div>
+
+    <div class="canvas-container" id="canvasContainer">
+      <canvas id="canvas"></canvas>
+    </div>
+
+    <div class="points-display" id="pointsDisplay">
+      Points selected: 0 / 4
+    </div>
+
+    <div class="controls">
+      <div class="control-group">
+        <label>Width (mm)</label>
+        <input type="number" step="0.1" name="width_mm" value="381.0" required>
+      </div>
+      
+      <div class="control-group">
+        <label>Height (mm)</label>
+        <input type="number" step="0.1" name="height_mm" value="228.6" required>
+      </div>
+      
+      <div class="control-group">
+        <label>DPI</label>
+        <input type="number" step="1" name="dpi" value="300">
+      </div>
+      
+      <div class="control-group">
+        <label>Margin (mm)</label>
+        <input type="number" step="0.1" name="margin_mm" value="10.0">
+      </div>
+      
+      <div class="control-group">
+        <label class="checkbox-label">
+          <input type="checkbox" name="enforce_axes" checked>
+          Enforce axes
+        </label>
+      </div>
+
+      <div class="control-group">
+        <label>Image Scale</label>
+        <div class="zoom-controls">
+          <button type="button" class="zoom-btn" id="zoomOut">−</button>
+          <span class="zoom-label" id="zoomLabel">200%</span>
+          <button type="button" class="zoom-btn" id="zoomIn">+</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="action-buttons">
+      <button type="button" class="btn-secondary" id="undoBtn">Undo Last Point</button>
+      <button type="button" class="btn-danger" id="resetBtn">Reset All</button>
+      <button type="submit" class="btn-primary" id="submitBtn" disabled>Rectify Image</button>
+    </div>
+  </form>
+
+  <div id="result"></div>
+</div>
 
 <script>
-const fileInput = document.getElementById('file');
-const canvas = document.getElementById('c');
+const fileInput = document.getElementById('fileInput');
+const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
-const ptsDiv = document.getElementById('pts');
-const undoBtn = document.getElementById('undo');
-const resetBtn = document.getElementById('reset');
-const goBtn = document.getElementById('go');
-const outDiv = document.getElementById('out');
+const canvasContainer = document.getElementById('canvasContainer');
+const pointsDisplay = document.getElementById('pointsDisplay');
+const undoBtn = document.getElementById('undoBtn');
+const resetBtn = document.getElementById('resetBtn');
+const submitBtn = document.getElementById('submitBtn');
+const resultDiv = document.getElementById('result');
+const zoomInBtn = document.getElementById('zoomIn');
+const zoomOutBtn = document.getElementById('zoomOut');
+const zoomLabel = document.getElementById('zoomLabel');
 
 let img = new Image();
 let naturalW = 0, naturalH = 0;
 let points = [];
+let scale = 2.0; // Default 2x scale
 
-let zoomMode = false;
-let zoomCenter = null;
-let zoomSize = 150; // half-size of zoom square (screen px)
+const COLORS = ['#e53935', '#1e88e5', '#43a047', '#fb8c00']; // Red, Blue, Green, Orange
 
-function draw() {
-  if (!naturalW) { canvas.width = 800; canvas.height = 450; ctx.clearRect(0,0,800,450); return; }
-  const maxW = Math.min(1000, window.innerWidth - 64);
-  const scale = Math.min(1, maxW / naturalW);
-  const cw = Math.round(naturalW * scale);
-  const ch = Math.round(naturalH * scale);
-  canvas.width = cw; canvas.height = ch;
-  ctx.clearRect(0,0,cw,ch);
-  ctx.drawImage(img, 0, 0, cw, ch);
+function updateZoomLabel() {
+  zoomLabel.textContent = `${Math.round(scale * 100)}%`;
+}
 
-  // existing points
-  ctx.lineWidth = 2;
-  points.forEach((p, i) => {
-    const sx = p.x * scale, sy = p.y * scale;
-    ctx.strokeStyle = "#ffcc00";
-    ctx.beginPath(); ctx.arc(sx, sy, 8, 0, 2*Math.PI); ctx.stroke();
-    ctx.fillStyle = "#e53935";
-    ctx.beginPath(); ctx.arc(sx, sy, 4, 0, 2*Math.PI); ctx.fill();
-    ctx.fillStyle = "#000"; ctx.font = "14px system-ui";
-    ctx.fillText(String(i+1), sx + 10, sy - 10);
-  });
-
-  // zoom window preview
-  if (zoomMode && zoomCenter) {
-    const zw = zoomSize*2, zh = zoomSize*2;
-    const sx = zoomCenter.x * scale - zoomSize;
-    const sy = zoomCenter.y * scale - zoomSize;
-
-    ctx.strokeStyle = "#00f"; ctx.lineWidth = 1; ctx.strokeRect(sx, sy, zw, zh);
-
-    // draw magnified inset at bottom-left
-    const srcW = (zw/scale), srcH = (zh/scale);
-    const srcX = Math.max(0, zoomCenter.x - srcW/2);
-    const srcY = Math.max(0, zoomCenter.y - srcH/2);
-    ctx.drawImage(img, srcX, srcY, srcW, srcH,
-                  20, canvas.height - zh - 20, zw, zh);
-    ctx.strokeStyle = "#000";
-    ctx.strokeRect(20, canvas.height - zh - 20, zw, zh);
+function drawCanvas() {
+  if (!naturalW) {
+    canvas.width = 800;
+    canvas.height = 600;
+    ctx.clearRect(0, 0, 800, 600);
+    return;
   }
 
-  ptsDiv.textContent = points.length
-    ? ("Points: " + points.map(p => `(${p.x.toFixed(1)}, ${p.y.toFixed(1)})`).join("  "))
-    : "Points: (none)";
-  goBtn.disabled = (points.length !== 4);
+  const displayW = Math.round(naturalW * scale);
+  const displayH = Math.round(naturalH * scale);
+  
+  canvas.width = displayW;
+  canvas.height = displayH;
+  
+  ctx.clearRect(0, 0, displayW, displayH);
+  ctx.drawImage(img, 0, 0, displayW, displayH);
+
+  // Draw points
+  points.forEach((p, i) => {
+    const x = p.x * scale;
+    const y = p.y * scale;
+    
+    // Outer circle (white border)
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(x, y, 12, 0, 2 * Math.PI);
+    ctx.stroke();
+    
+    // Inner circle (colored)
+    ctx.fillStyle = COLORS[i];
+    ctx.beginPath();
+    ctx.arc(x, y, 10, 0, 2 * Math.PI);
+    ctx.fill();
+    
+    // Label
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 14px system-ui';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(i + 1), x, y);
+  });
+
+  updatePointsDisplay();
+}
+
+function updatePointsDisplay() {
+  const count = points.length;
+  if (count === 0) {
+    pointsDisplay.textContent = 'Points selected: 0 / 4';
+  } else {
+    const coords = points.map((p, i) => 
+      `Point ${i+1}: (${Math.round(p.x)}, ${Math.round(p.y)})`
+    ).join('  •  ');
+    pointsDisplay.textContent = `Points selected: ${count} / 4  •  ${coords}`;
+  }
+  
+  submitBtn.disabled = (count !== 4);
 }
 
 fileInput.addEventListener('change', () => {
-  points = []; outDiv.innerHTML = "";
-  const f = fileInput.files[0]; if (!f) return;
-  const url = URL.createObjectURL(f);
-  img.onload = () => { naturalW = img.naturalWidth; naturalH = img.naturalHeight; draw(); };
+  points = [];
+  resultDiv.innerHTML = '';
+  const file = fileInput.files[0];
+  if (!file) return;
+  
+  const url = URL.createObjectURL(file);
+  img.onload = () => {
+    naturalW = img.naturalWidth;
+    naturalH = img.naturalHeight;
+    canvasContainer.classList.add('active');
+    drawCanvas();
+  };
   img.src = url;
 });
 
 canvas.addEventListener('click', (e) => {
-  if (!naturalW) return;
+  if (!naturalW || points.length >= 4) return;
+  
   const rect = canvas.getBoundingClientRect();
-  const sx = e.clientX - rect.left;
-  const sy = e.clientY - rect.top;
-  const scale = canvas.width / naturalW;
-  const x = sx / scale, y = sy / scale;
-
-  if (!zoomMode) { // first click -> open zoom
-    zoomMode = true; zoomCenter = {x, y}; draw(); return;
-  }
-  // second click -> confirm
-  points.push({x, y}); zoomMode = false; zoomCenter = null; draw();
+  const scrollLeft = canvasContainer.scrollLeft;
+  const scrollTop = canvasContainer.scrollTop;
+  
+  const canvasX = e.clientX - rect.left + scrollLeft;
+  const canvasY = e.clientY - rect.top + scrollTop;
+  
+  // Convert from display coordinates to natural image coordinates
+  const x = canvasX / scale;
+  const y = canvasY / scale;
+  
+  points.push({ x, y });
+  drawCanvas();
 });
 
-undoBtn.addEventListener('click', () => { points.pop(); draw(); });
-resetBtn.addEventListener('click', () => { points = []; zoomMode=false; draw(); });
+undoBtn.addEventListener('click', () => {
+  points.pop();
+  drawCanvas();
+});
 
-document.getElementById('frm').addEventListener('submit', async (e) => {
+resetBtn.addEventListener('click', () => {
+  points = [];
+  drawCanvas();
+});
+
+zoomInBtn.addEventListener('click', () => {
+  if (scale < 4.0) {
+    scale += 0.5;
+    drawCanvas();
+    updateZoomLabel();
+  }
+});
+
+zoomOutBtn.addEventListener('click', () => {
+  if (scale > 0.5) {
+    scale -= 0.5;
+    drawCanvas();
+    updateZoomLabel();
+  }
+});
+
+document.getElementById('form').addEventListener('submit', async (e) => {
   e.preventDefault();
   if (points.length !== 4) return;
-  const fd = new FormData(e.target);
-  fd.set('enforce_axes', e.target.enforce_axes.checked ? 'true' : 'false');
-  fd.set('points', JSON.stringify(points.map(p => ({x:p.x, y:p.y}))));
-  const btn = document.getElementById('go'); btn.disabled = true; btn.textContent = 'Processing…';
-  outDiv.innerHTML = "";
+  
+  const formData = new FormData(e.target);
+  formData.set('enforce_axes', e.target.enforce_axes.checked ? 'true' : 'false');
+  formData.set('points', JSON.stringify(points.map(p => ({ x: p.x, y: p.y }))));
+  
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Processing...';
+  resultDiv.innerHTML = '';
+  
   try {
-    const res = await fetch('/rectify_manual', { method: 'POST', body: fd });
-    if (!res.ok) throw new Error(await res.text());
-    const blob = await res.blob();
+    const response = await fetch('/rectify', {
+      method: 'POST',
+      body: formData
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText);
+    }
+    
+    const blob = await response.blob();
     const url = URL.createObjectURL(blob);
-    outDiv.innerHTML = `<h2>Result</h2><a download="rectified.png" href="${url}">Download PNG</a><br><br><img src="${url}">`;
+    
+    resultDiv.innerHTML = `
+      <h2>Rectified Image</h2>
+      <a href="${url}" download="rectified.png" class="btn-primary" style="display:inline-block; text-decoration:none; margin-bottom:1rem;">
+        Download PNG
+      </a>
+      <br>
+      <img src="${url}" alt="Rectified result">
+    `;
   } catch (err) {
-    outDiv.innerHTML = '<p style="color:#b00020;">' + err.message + '</p>';
+    resultDiv.innerHTML = `<div class="error"><strong>Error:</strong> ${err.message}</div>`;
   } finally {
-    btn.disabled = false; btn.textContent = 'Rectify';
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Rectify Image';
   }
 });
-window.addEventListener('resize', draw);
+
+updateZoomLabel();
 </script>
 </body>
 </html>
     """
 
-# ---------- MANUAL mode API ----------
-@app.post("/rectify_manual")
-async def rectify_manual(
+# ---------- Rectify API ----------
+@app.post("/rectify")
+async def rectify(
     image: UploadFile = File(...),
     points: str = Form(...),             # JSON [{x,y}, ...] length=4
     width_mm: float = Form(...),

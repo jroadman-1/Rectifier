@@ -69,11 +69,42 @@ def _align_image_by_edge(image_bgr, pt1, pt2, direction='horizontal'):
     angle_rad = math.atan2(dy, dx)
     angle_deg = math.degrees(angle_rad)
     
+    # Note: In image coordinates, Y increases downward, but atan2 gives us
+    # the angle in standard math coordinates. When we use this with OpenCV's
+    # rotation, we need to negate it to get the correct visual rotation.
+    angle_deg = -angle_deg
+    
     # Adjust angle based on desired direction
     if direction == 'horizontal':
-        rotation_angle = -angle_deg
+        # Calculate rotation to make line horizontal (parallel to x-axis)
+        # Two options: rotate to 0° or 180°
+        rot_to_0 = -angle_deg
+        rot_to_180 = 180 - angle_deg
+        
+        # Normalize angles to [-180, 180] range
+        rot_to_0 = ((rot_to_0 + 180) % 360) - 180
+        rot_to_180 = ((rot_to_180 + 180) % 360) - 180
+        
+        # Choose the rotation with smaller absolute value (minimal rotation)
+        if abs(rot_to_0) <= abs(rot_to_180):
+            rotation_angle = rot_to_0
+        else:
+            rotation_angle = rot_to_180
     else:  # vertical
-        rotation_angle = 90 - angle_deg
+        # Calculate rotation to make line vertical (parallel to y-axis)
+        # Two options: rotate to 90° or -90°
+        rot_to_90 = 90 - angle_deg
+        rot_to_minus_90 = -90 - angle_deg
+        
+        # Normalize angles to [-180, 180] range
+        rot_to_90 = ((rot_to_90 + 180) % 360) - 180
+        rot_to_minus_90 = ((rot_to_minus_90 + 180) % 360) - 180
+        
+        # Choose the rotation with smaller absolute value (minimal rotation)
+        if abs(rot_to_90) <= abs(rot_to_minus_90):
+            rotation_angle = rot_to_90
+        else:
+            rotation_angle = rot_to_minus_90
     
     # Get image dimensions
     h, w = image_bgr.shape[:2]

@@ -627,12 +627,13 @@ let dragMoved = false;
 let shiftHeld = false;
 
 const COLORS = ['#e53935', '#1e88e5', '#43a047', '#fb8c00'];
-const MIN_SCALE = 0.1;
 const MAX_SCALE = 8.0;
 const ZOOM_STEP = 0.08;
 const WHEEL_ZOOM_IN_STEP = 0.025;
 const WHEEL_ZOOM_OUT_STEP = 0.05;
 const DRAG_THRESHOLD = 10;
+
+let minScale = 0.1; // Will be updated based on image fit
 
 let rectifiedImageBlob = null; // Store for step 2
 
@@ -645,7 +646,12 @@ function fitImageToContainer() {
   const containerH = canvasContainer.clientHeight;
   const scaleW = containerW / naturalW;
   const scaleH = containerH / naturalH;
-  scale = Math.min(scaleW, scaleH, 1.0) * 0.9;
+  const fitScale = Math.min(scaleW, scaleH, 1.0) * 0.9;
+  
+  // Set this as the minimum zoom level
+  minScale = fitScale;
+  
+  scale = fitScale;
   panX = (containerW - naturalW * scale) / 2;
   panY = (containerH - naturalH * scale) / 2;
 }
@@ -718,7 +724,7 @@ function zoomAtPoint(zoomIn, mouseX, mouseY, step = ZOOM_STEP) {
   const oldScale = scale;
   const newScale = zoomIn 
     ? Math.min(scale + step, MAX_SCALE)
-    : Math.max(scale - step, MIN_SCALE);
+    : Math.max(scale - step, minScale);
   
   if (oldScale === newScale) return;
   
@@ -935,6 +941,7 @@ let alignDragStartX = 0, alignDragStartY = 0;
 let alignDragMoved = false;
 
 const ALIGN_COLORS = ['#e53935', '#1e88e5'];
+let alignMinScale = 0.1; // Will be updated based on image fit
 
 function startAlignment() {
   document.getElementById('step2').classList.remove('hidden');
@@ -959,7 +966,12 @@ function fitAlignImageToContainer() {
   const containerH = alignCanvasContainer.clientHeight;
   const scaleW = containerW / alignNaturalW;
   const scaleH = containerH / alignNaturalH;
-  alignScale = Math.min(scaleW, scaleH, 1.0) * 0.9;
+  const fitScale = Math.min(scaleW, scaleH, 1.0) * 0.9;
+  
+  // Set this as the minimum zoom level
+  alignMinScale = fitScale;
+  
+  alignScale = fitScale;
   alignPanX = (containerW - alignNaturalW * alignScale) / 2;
   alignPanY = (containerH - alignNaturalH * alignScale) / 2;
 }
@@ -1031,7 +1043,7 @@ function alignZoomAtPoint(zoomIn, mouseX, mouseY, step = ZOOM_STEP) {
   const oldScale = alignScale;
   const newScale = zoomIn 
     ? Math.min(alignScale + step, MAX_SCALE)
-    : Math.max(alignScale - step, MIN_SCALE);
+    : Math.max(alignScale - step, alignMinScale);
   
   if (oldScale === newScale) return;
   

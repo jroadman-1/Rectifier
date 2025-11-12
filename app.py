@@ -1,4 +1,4 @@
-# app_maps_style_v5.py
+# app_maps_style_v5_improved.py
 import os, io, sys, uuid, shutil, subprocess, json, math
 from pathlib import Path
 from typing import Optional
@@ -14,15 +14,42 @@ TMP.mkdir(parents=True, exist_ok=True)
 # ------------- Helpers -------------
 
 def _order_corners_tl_tr_br_bl_np(pts_xy):
-    """Order 4 points as TL, TR, BR, BL using sums and diffs."""
+    """
+    Order 4 points as TL, TR, BR, BL intelligently.
+    
+    This improved version:
+    1. Finds the center of the 4 points
+    2. Determines which points are on top/bottom (relative to center)
+    3. Determines which points are on left/right (relative to center)
+    4. Assigns corners accordingly
+    
+    This works regardless of the order points are placed and respects
+    the intended orientation of the rectangle.
+    """
     import numpy as np
     pts = np.asarray(pts_xy, dtype=np.float32)
-    s = pts.sum(axis=1)
-    d = np.diff(pts, axis=1).ravel()
-    tl = pts[np.argmin(s)]
-    br = pts[np.argmax(s)]
-    tr = pts[np.argmin(d)]
-    bl = pts[np.argmax(d)]
+    
+    # Find the centroid
+    center = pts.mean(axis=0)
+    
+    # Sort points by y-coordinate (top to bottom)
+    sorted_by_y = pts[np.argsort(pts[:, 1])]
+    
+    # Top two points are the ones with smaller y
+    top_two = sorted_by_y[:2]
+    # Bottom two points are the ones with larger y
+    bottom_two = sorted_by_y[2:]
+    
+    # Within top two, sort by x to get TL and TR
+    top_sorted = top_two[np.argsort(top_two[:, 0])]
+    tl = top_sorted[0]  # leftmost of top two
+    tr = top_sorted[1]  # rightmost of top two
+    
+    # Within bottom two, sort by x to get BL and BR
+    bottom_sorted = bottom_two[np.argsort(bottom_two[:, 0])]
+    bl = bottom_sorted[0]  # leftmost of bottom two
+    br = bottom_sorted[1]  # rightmost of bottom two
+    
     return np.array([tl, tr, br, bl], dtype=np.float32)
 
 def _warp_by_corners(image_bgr, src_pts_xy, width_mm, height_mm, dpi=300.0, margin_mm=10.0, enforce_axes=True):
@@ -145,7 +172,7 @@ def ui():
 <html>
 <head>
 <meta charset="utf-8">
-<title>Four-Dot Rectifier with Alignment</title>
+<title>Four-Dot Rectifier with Alignment (Improved)</title>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -203,6 +230,9 @@ def ui():
     margin: 0.25rem 0;
     color: #1565c0;
     font-size: 0.9rem;
+  }
+  .instructions strong {
+    color: #0d47a1;
   }
   .canvas-container {
     position: relative;
@@ -271,312 +301,287 @@ def ui():
   
   .marker-outer {
     position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 50px;
-    height: 50px;
-    margin-left: -25px;
-    margin-top: -25px;
+    width: 100%;
+    height: 100%;
+    border: 3px solid white;
     border-radius: 50%;
-    border: 4px solid white;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    box-shadow: 0 0 0 2px rgba(0,0,0,0.3);
   }
   
   .marker-inner {
     position: absolute;
     top: 50%;
     left: 50%;
-    width: 40px;
-    height: 40px;
-    margin-left: -20px;
-    margin-top: -20px;
+    width: 12px;
+    height: 12px;
+    margin-left: -6px;
+    margin-top: -6px;
     border-radius: 50%;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
   }
   
-  .marker-label {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    color: white;
-    font-weight: bold;
-    font-size: 20px;
-    text-shadow: 0 1px 3px rgba(0,0,0,0.5);
-  }
+  .marker:nth-child(1) .marker-outer { border-color: #f44336; }
+  .marker:nth-child(1) .marker-inner { background: #f44336; }
   
-  .zoom-overlay {
-    position: absolute;
-    top: 10px;
-    right: 10px;
-    background: white;
-    border-radius: 4px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-    display: flex;
-    flex-direction: column;
-    z-index: 1001;
-  }
+  .marker:nth-child(2) .marker-outer { border-color: #2196f3; }
+  .marker:nth-child(2) .marker-inner { background: #2196f3; }
   
-  .zoom-overlay button {
-    width: 40px;
-    height: 40px;
-    border: none;
-    background: white;
-    cursor: pointer;
-    font-size: 20px;
-    font-weight: bold;
-    color: #666;
-    transition: background 0.2s;
-  }
+  .marker:nth-child(3) .marker-outer { border-color: #ff9800; }
+  .marker:nth-child(3) .marker-inner { background: #ff9800; }
   
-  .zoom-overlay button:hover {
-    background: #f0f0f0;
-  }
+  .marker:nth-child(4) .marker-outer { border-color: #4caf50; }
+  .marker:nth-child(4) .marker-inner { background: #4caf50; }
   
-  .zoom-overlay button:first-child {
-    border-radius: 4px 4px 0 0;
-  }
-  
-  .zoom-overlay button:last-child {
-    border-radius: 0 0 4px 4px;
-    border-top: 1px solid #ddd;
-  }
-  
-  .zoom-info {
-    position: absolute;
-    bottom: 10px;
-    left: 10px;
-    background: rgba(255, 255, 255, 0.9);
-    padding: 0.5rem;
-    border-radius: 4px;
-    font-size: 0.875rem;
-    color: #666;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-  }
-  
-  .points-display {
-    padding: 0.75rem;
-    background: #f5f5f5;
-    border-radius: 4px;
-    margin-bottom: 1rem;
-    font-family: monospace;
-    color: #333;
-  }
-  .controls {
+  .form-group {
     display: flex;
     gap: 1rem;
-    flex-wrap: wrap;
-    align-items: flex-end;
     margin-bottom: 1rem;
+    flex-wrap: wrap;
   }
-  .control-group {
-    display: flex;
-    flex-direction: column;
+  .form-group > div {
+    flex: 1;
+    min-width: 200px;
   }
-  .control-group label {
-    font-size: 0.875rem;
-    color: #666;
+  .form-group label {
+    display: block;
     margin-bottom: 0.25rem;
+    font-weight: 500;
+    color: #333;
   }
-  .control-group input[type="number"] {
+  .form-group input {
+    width: 100%;
     padding: 0.5rem;
     border: 1px solid #ddd;
     border-radius: 4px;
     font-size: 1rem;
-    width: 120px;
   }
-  .control-group input[type="checkbox"] {
-    margin-right: 0.5rem;
+  .form-group input:focus {
+    outline: none;
+    border-color: #2196f3;
   }
-  .checkbox-label {
-    display: flex;
+  .checkbox-group {
+    margin-bottom: 1rem;
+  }
+  .checkbox-group label {
+    display: inline-flex;
     align-items: center;
-    font-size: 0.875rem;
+    gap: 0.5rem;
+    font-weight: 500;
     color: #333;
+    cursor: pointer;
+  }
+  .checkbox-group input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
   }
   .radio-group {
-    display: flex;
-    gap: 1rem;
-    margin: 1rem 0;
+    margin-bottom: 1rem;
   }
   .radio-group label {
-    display: flex;
+    display: inline-flex;
     align-items: center;
+    gap: 0.5rem;
+    margin-right: 1.5rem;
+    font-weight: 500;
+    color: #333;
     cursor: pointer;
   }
   .radio-group input[type="radio"] {
-    margin-right: 0.5rem;
-  }
-  button {
-    padding: 0.625rem 1.5rem;
-    border: none;
-    border-radius: 4px;
-    font-size: 1rem;
+    width: 18px;
+    height: 18px;
     cursor: pointer;
-    transition: background 0.2s;
   }
-  button:disabled {
+  .controls {
+    display: flex;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+  }
+  .btn {
+    padding: 0.5rem 1rem;
+    border: 1px solid #ddd;
+    background: white;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: all 0.2s;
+  }
+  .btn:hover:not(:disabled) {
+    background: #f5f5f5;
+    border-color: #999;
+  }
+  .btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
   .btn-primary {
     background: #2196f3;
     color: white;
+    border-color: #2196f3;
+    font-weight: 500;
   }
   .btn-primary:hover:not(:disabled) {
     background: #1976d2;
+    border-color: #1976d2;
   }
   .btn-secondary {
     background: #757575;
     color: white;
+    border-color: #757575;
   }
   .btn-secondary:hover:not(:disabled) {
     background: #616161;
+    border-color: #616161;
   }
-  .btn-success {
-    background: #43a047;
-    color: white;
+  .status {
+    padding: 0.75rem 1rem;
+    margin-bottom: 1rem;
+    border-radius: 4px;
+    font-size: 0.9rem;
   }
-  .btn-success:hover:not(:disabled) {
-    background: #388e3c;
+  .status p {
+    margin: 0;
   }
-  .btn-danger {
-    background: #f44336;
-    color: white;
-  }
-  .btn-danger:hover:not(:disabled) {
-    background: #d32f2f;
-  }
-  .action-buttons {
-    display: flex;
-    gap: 0.75rem;
-    flex-wrap: wrap;
+  .zoom-display {
+    padding: 0.5rem 0.75rem;
+    background: #f5f5f5;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    color: #555;
+    min-width: 100px;
+    text-align: center;
   }
   .result-section {
-    background: #f9f9f9;
-    padding: 1.5rem;
-    border-radius: 8px;
     margin-top: 2rem;
+    padding: 1.5rem;
+    background: #f9f9f9;
+    border-radius: 4px;
+  }
+  .result-section h3 {
+    margin: 0 0 1rem 0;
+    color: #1a1a1a;
   }
   .result-section img {
     max-width: 100%;
-    height: auto;
     border: 1px solid #ddd;
     border-radius: 4px;
-    margin: 1rem 0;
   }
   .result-buttons {
+    margin-top: 1rem;
     display: flex;
     gap: 0.75rem;
-    flex-wrap: wrap;
-    margin-top: 1rem;
   }
   .error {
-    padding: 1rem;
     background: #ffebee;
     color: #c62828;
+    padding: 1rem;
     border-radius: 4px;
-    margin-top: 1rem;
+    border-left: 4px solid #c62828;
   }
 </style>
 </head>
 <body>
 <div class="container">
-  <h1>Four-Dot Rectifier with Alignment</h1>
+  <h1>🎸 Four-Dot Rectifier with Alignment (Improved)</h1>
   
-  <!-- STEP 1: RECTIFICATION -->
+  <!-- STEP 1: Rectification -->
   <div class="step" id="step1">
-    <h2>Step 1: Rectify Image</h2>
-    
-    <form id="rectifyForm">
-      <div class="upload-section">
-        <input type="file" id="fileInput" name="image" accept="image/*" required>
-      </div>
-
-      <div class="instructions">
-        <p><strong>Instructions:</strong> Hold <kbd>Shift</kbd> and click to place each of the 4 corner dots.</p>
-        <p><strong>Navigation:</strong> Mouse wheel to zoom (smooth & slow) • Click and drag to pan • Double-click to zoom in</p>
-      </div>
-
-      <div class="canvas-container" id="canvasContainer">
-        <div id="canvasWrapper">
-          <canvas id="canvas"></canvas>
-          <div id="markersContainer"></div>
-        </div>
-        <div class="zoom-overlay">
-          <button type="button" id="zoomInBtn" title="Zoom in">+</button>
-          <button type="button" id="zoomOutBtn" title="Zoom out">−</button>
-        </div>
-        <div class="zoom-info" id="zoomInfo">Zoom: 100%</div>
-      </div>
-
-      <div class="points-display" id="pointsDisplay">
-        Points selected: 0 / 4
-      </div>
-
-      <div class="controls">
-        <div class="control-group">
-          <label>Width (mm)</label>
-          <input type="number" step="0.1" name="width_mm" value="381.0" required>
-        </div>
-        
-        <div class="control-group">
-          <label>Height (mm)</label>
-          <input type="number" step="0.1" name="height_mm" value="228.6" required>
-        </div>
-        
-        <div class="control-group">
-          <label>DPI</label>
-          <input type="number" step="1" name="dpi" value="300">
-        </div>
-        
-        <div class="control-group">
-          <label>Margin (mm)</label>
-          <input type="number" step="0.1" name="margin_mm" value="10.0">
-        </div>
-        
-        <div class="control-group">
-          <label class="checkbox-label">
-            <input type="checkbox" name="enforce_axes" checked>
-            Enforce axes
-          </label>
-        </div>
-      </div>
-
-      <div class="action-buttons">
-        <button type="button" class="btn-secondary" id="undoBtn">Undo Last Point</button>
-        <button type="button" class="btn-danger" id="resetBtn">Reset All</button>
-        <button type="submit" class="btn-primary" id="submitBtn" disabled>Rectify Image</button>
-      </div>
-    </form>
-
-    <div id="rectifyResult"></div>
-  </div>
-
-  <!-- STEP 2: ALIGNMENT (hidden initially) -->
-  <div class="step hidden" id="step2">
-    <h2>Step 2: Align Object Edge (Optional)</h2>
+    <h2>Step 1: Rectify Image to Known Dimensions</h2>
     
     <div class="instructions">
-      <p><strong>Instructions:</strong> Hold <kbd>Shift</kbd> and click 2 points on an object edge you want to align.</p>
-      <p><strong>Choose alignment:</strong> Horizontal (left-to-right) or Vertical (top-to-bottom)</p>
+      <p><strong>Instructions:</strong></p>
+      <p>1. Upload your image</p>
+      <p>2. Hold <kbd>Shift</kbd> and click to place 4 corner points (in any order - the program will figure out the correct orientation)</p>
+      <p>3. Enter the width and height that the rectangle should be</p>
+      <p>4. Click "Rectify Image"</p>
+      <p><strong>New:</strong> You can now place points in any order! The program intelligently determines which corner is which.</p>
     </div>
-
+    
+    <div class="upload-section">
+      <input type="file" id="imageUpload" accept="image/*">
+    </div>
+    
+    <div class="canvas-container" id="canvasContainer">
+      <div id="canvasWrapper">
+        <canvas id="canvas"></canvas>
+        <div id="markersContainer"></div>
+      </div>
+    </div>
+    
+    <div class="controls">
+      <button class="btn" id="zoomInBtn">Zoom In (+)</button>
+      <button class="btn" id="zoomOutBtn">Zoom Out (−)</button>
+      <div class="zoom-display" id="zoomDisplay">Zoom: 100%</div>
+      <button class="btn" id="undoBtn" disabled>Undo Last Point</button>
+      <button class="btn" id="resetBtn" disabled>Reset Points</button>
+    </div>
+    
+    <div class="status" id="pointsDisplay" style="background:#f5f5f5;">
+      Points selected: 0 / 4
+    </div>
+    
+    <div class="form-group">
+      <div>
+        <label for="widthMm">Width (mm)</label>
+        <input type="number" id="widthMm" value="101.6" step="0.1" min="0">
+      </div>
+      <div>
+        <label for="heightMm">Height (mm)</label>
+        <input type="number" id="heightMm" value="177.8" step="0.1" min="0">
+      </div>
+      <div>
+        <label for="dpi">DPI</label>
+        <input type="number" id="dpi" value="300" step="1" min="1">
+      </div>
+      <div>
+        <label for="marginMm">Margin (mm)</label>
+        <input type="number" id="marginMm" value="10.0" step="0.1" min="0">
+      </div>
+    </div>
+    
+    <div class="checkbox-group">
+      <label>
+        <input type="checkbox" id="enforceAxes" checked>
+        Enforce axes
+      </label>
+    </div>
+    
+    <button class="btn btn-primary" id="rectifyBtn" disabled>Rectify Image</button>
+    
+    <div id="rectifyResult"></div>
+  </div>
+  
+  <!-- STEP 2: Alignment -->
+  <div class="step hidden" id="step2">
+    <h2>Step 2: Align Image (Optional)</h2>
+    
+    <div class="instructions">
+      <p><strong>Instructions:</strong></p>
+      <p>1. Hold <kbd>Shift</kbd> and click to place 2 points along an edge that should be horizontal or vertical</p>
+      <p>2. Select the desired alignment direction</p>
+      <p>3. Click "Apply Alignment" (or skip this step)</p>
+    </div>
+    
     <div class="canvas-container" id="alignCanvasContainer">
       <div id="alignCanvasWrapper">
         <canvas id="alignCanvas"></canvas>
         <div id="alignMarkersContainer"></div>
       </div>
-      <div class="zoom-overlay">
-        <button type="button" id="alignZoomInBtn" title="Zoom in">+</button>
-        <button type="button" id="alignZoomOutBtn" title="Zoom out">−</button>
-      </div>
-      <div class="zoom-info" id="alignZoomInfo">Zoom: 100%</div>
     </div>
-
-    <div class="points-display" id="alignPointsDisplay">
+    
+    <div class="controls">
+      <button class="btn" id="alignZoomInBtn">Zoom In (+)</button>
+      <button class="btn" id="alignZoomOutBtn">Zoom Out (−)</button>
+      <div class="zoom-display" id="alignZoomDisplay">Zoom: 100%</div>
+      <button class="btn" id="alignUndoBtn" disabled>Undo Last Point</button>
+      <button class="btn" id="alignResetBtn" disabled>Reset Points</button>
+    </div>
+    
+    <div class="status" id="alignPointsDisplay" style="background:#f5f5f5;">
       Points selected: 0 / 2
     </div>
-
+    
     <div class="radio-group">
       <label>
         <input type="radio" name="alignDirection" value="horizontal" checked>
@@ -587,116 +592,141 @@ def ui():
         Vertical
       </label>
     </div>
-
-    <div class="action-buttons">
-      <button type="button" class="btn-secondary" id="alignUndoBtn">Undo Last Point</button>
-      <button type="button" class="btn-danger" id="alignResetBtn">Reset Points</button>
-      <button type="button" class="btn-success" id="applyAlignBtn" disabled>Apply Alignment</button>
-      <button type="button" class="btn-secondary" id="skipAlignBtn">Skip Alignment</button>
+    
+    <div class="controls">
+      <button class="btn btn-primary" id="applyAlignBtn" disabled>Apply Alignment</button>
+      <button class="btn btn-secondary" id="skipAlignBtn">Skip Alignment</button>
     </div>
-
+    
     <div id="alignResult"></div>
   </div>
+  
 </div>
 
 <script>
-// ========== STEP 1: RECTIFICATION ==========
-const fileInput = document.getElementById('fileInput');
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
+// --- Constants ---
+const ZOOM_STEP = 0.13;
+const WHEEL_ZOOM_IN_STEP = 0.13;
+const WHEEL_ZOOM_OUT_STEP = 0.10;
+const MAX_SCALE = 4.0;
+const DRAG_THRESHOLD = 3;
+
+// --- Step 1: Rectification ---
+const imageUpload = document.getElementById('imageUpload');
 const canvasContainer = document.getElementById('canvasContainer');
 const canvasWrapper = document.getElementById('canvasWrapper');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
 const markersContainer = document.getElementById('markersContainer');
-const pointsDisplay = document.getElementById('pointsDisplay');
-const undoBtn = document.getElementById('undoBtn');
-const resetBtn = document.getElementById('resetBtn');
-const submitBtn = document.getElementById('submitBtn');
 const zoomInBtn = document.getElementById('zoomInBtn');
 const zoomOutBtn = document.getElementById('zoomOutBtn');
-const zoomInfo = document.getElementById('zoomInfo');
+const zoomDisplay = document.getElementById('zoomDisplay');
+const undoBtn = document.getElementById('undoBtn');
+const resetBtn = document.getElementById('resetBtn');
+const pointsDisplay = document.getElementById('pointsDisplay');
+const rectifyBtn = document.getElementById('rectifyBtn');
 const rectifyResult = document.getElementById('rectifyResult');
 
-let img = new Image();
+const widthMm = document.getElementById('widthMm');
+const heightMm = document.getElementById('heightMm');
+const dpi = document.getElementById('dpi');
+const marginMm = document.getElementById('marginMm');
+const enforceAxes = document.getElementById('enforceAxes');
+
+let img = null;
 let naturalW = 0, naturalH = 0;
 let points = [];
 let scale = 1.0;
+let minScale = 1.0;
 let panX = 0, panY = 0;
 let isDragging = false;
 let dragStartX = 0, dragStartY = 0;
 let dragMoved = false;
 let shiftHeld = false;
 
-const COLORS = ['#e53935', '#1e88e5', '#43a047', '#fb8c00'];
-const MAX_SCALE = 8.0;
-const ZOOM_STEP = 0.08;
-const WHEEL_ZOOM_IN_STEP = 0.025;
-const WHEEL_ZOOM_OUT_STEP = 0.05;
-const DRAG_THRESHOLD = 10;
+let rectifiedImageBlob = null;
 
-let minScale = 0.1; // Will be updated based on image fit
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Shift') {
+    shiftHeld = true;
+    if (canvasContainer.classList.contains('active')) {
+      canvasContainer.classList.add('crosshair');
+    }
+    if (alignCanvasContainer.classList.contains('active')) {
+      alignCanvasContainer.classList.add('crosshair');
+    }
+  }
+});
 
-let rectifiedImageBlob = null; // Store for step 2
+document.addEventListener('keyup', (e) => {
+  if (e.key === 'Shift') {
+    shiftHeld = false;
+    canvasContainer.classList.remove('crosshair');
+    alignCanvasContainer.classList.remove('crosshair');
+  }
+});
 
-function updateZoomInfo() {
-  zoomInfo.textContent = `Zoom: ${Math.round(scale * 100)}%`;
-}
-
-function fitImageToContainer() {
-  const containerW = canvasContainer.clientWidth;
-  const containerH = canvasContainer.clientHeight;
-  const scaleW = containerW / naturalW;
-  const scaleH = containerH / naturalH;
-  const fitScale = Math.min(scaleW, scaleH, 1.0) * 0.9;
+imageUpload.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
   
-  // Set this as the minimum zoom level
-  minScale = fitScale;
-  
-  scale = fitScale;
-  panX = (containerW - naturalW * scale) / 2;
-  panY = (containerH - naturalH * scale) / 2;
-}
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    img = new Image();
+    img.onload = () => {
+      naturalW = img.width;
+      naturalH = img.height;
+      
+      canvas.width = naturalW;
+      canvas.height = naturalH;
+      
+      const containerW = canvasContainer.clientWidth;
+      const containerH = canvasContainer.clientHeight;
+      const scaleW = containerW / naturalW;
+      const scaleH = containerH / naturalH;
+      minScale = Math.min(scaleW, scaleH, 1.0);
+      
+      scale = minScale;
+      panX = (containerW - naturalW * scale) / 2;
+      panY = (containerH - naturalH * scale) / 2;
+      
+      points = [];
+      
+      drawCanvas();
+      canvasContainer.classList.add('active');
+      updatePointsDisplay();
+    };
+    img.src = evt.target.result;
+  };
+  reader.readAsDataURL(file);
+});
 
 function drawCanvas() {
-  if (!naturalW) {
-    canvas.width = 800;
-    canvas.height = 600;
-    ctx.clearRect(0, 0, 800, 600);
-    return;
-  }
-
-  canvas.width = naturalW;
-  canvas.height = naturalH;
+  if (!img) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0);
   
-  canvasWrapper.style.width = naturalW + 'px';
-  canvasWrapper.style.height = naturalH + 'px';
   canvasWrapper.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
   
-  ctx.clearRect(0, 0, naturalW, naturalH);
-  ctx.drawImage(img, 0, 0, naturalW, naturalH);
+  const zoomPct = Math.round(scale * 100);
+  zoomDisplay.textContent = `Zoom: ${zoomPct}%`;
   
   updateMarkers();
-  updateZoomInfo();
 }
 
 function updateMarkers() {
   markersContainer.innerHTML = '';
+  markersContainer.style.width = `${naturalW}px`;
+  markersContainer.style.height = `${naturalH}px`;
   
-  points.forEach((p, i) => {
+  points.forEach((pt) => {
     const marker = document.createElement('div');
     marker.className = 'marker';
-    marker.style.left = p.x + 'px';
-    marker.style.top = p.y + 'px';
-    
-    marker.innerHTML = `
-      <div class="marker-outer"></div>
-      <div class="marker-inner" style="background-color: ${COLORS[i]}"></div>
-      <div class="marker-label">${i + 1}</div>
-    `;
-    
+    marker.style.left = `${pt.x}px`;
+    marker.style.top = `${pt.y}px`;
+    marker.innerHTML = '<div class="marker-outer"></div><div class="marker-inner"></div>';
     markersContainer.appendChild(marker);
   });
-  
-  updatePointsDisplay();
 }
 
 function updatePointsDisplay() {
@@ -710,7 +740,9 @@ function updatePointsDisplay() {
     pointsDisplay.textContent = `Points selected: ${count} / 4  •  ${coords}`;
   }
   
-  submitBtn.disabled = (count !== 4);
+  undoBtn.disabled = (count === 0);
+  resetBtn.disabled = (count === 0);
+  rectifyBtn.disabled = (count !== 4);
 }
 
 function screenToCanvas(screenX, screenY) {
@@ -738,44 +770,6 @@ function zoomAtPoint(zoomIn, mouseX, mouseY, step = ZOOM_STEP) {
   
   drawCanvas();
 }
-
-fileInput.addEventListener('change', () => {
-  points = [];
-  rectifyResult.innerHTML = '';
-  document.getElementById('step2').classList.add('hidden');
-  const file = fileInput.files[0];
-  if (!file) return;
-  
-  const url = URL.createObjectURL(file);
-  img.onload = () => {
-    naturalW = img.naturalWidth;
-    naturalH = img.naturalHeight;
-    canvasContainer.classList.add('active');
-    fitImageToContainer();
-    drawCanvas();
-  };
-  img.src = url;
-});
-
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Shift' && !shiftHeld) {
-    shiftHeld = true;
-    if (canvasContainer.classList.contains('active')) {
-      canvasContainer.classList.add('crosshair');
-    }
-    if (alignCanvasContainer.classList.contains('active')) {
-      alignCanvasContainer.classList.add('crosshair');
-    }
-  }
-});
-
-document.addEventListener('keyup', (e) => {
-  if (e.key === 'Shift') {
-    shiftHeld = false;
-    canvasContainer.classList.remove('crosshair');
-    alignCanvasContainer.classList.remove('crosshair');
-  }
-});
 
 canvasContainer.addEventListener('mousedown', (e) => {
   isDragging = true;
@@ -807,7 +801,8 @@ canvasContainer.addEventListener('mouseup', (e) => {
     const coords = screenToCanvas(e.clientX, e.clientY);
     if (coords.x >= 0 && coords.x <= naturalW && coords.y >= 0 && coords.y <= naturalH) {
       points.push(coords);
-      updateMarkers();
+      updatePointsDisplay();
+      drawCanvas();
     }
   }
   
@@ -858,24 +853,31 @@ zoomOutBtn.addEventListener('click', () => {
 
 undoBtn.addEventListener('click', () => {
   points.pop();
-  updateMarkers();
+  updatePointsDisplay();
+  drawCanvas();
 });
 
 resetBtn.addEventListener('click', () => {
   points = [];
-  updateMarkers();
+  updatePointsDisplay();
+  drawCanvas();
 });
 
-document.getElementById('rectifyForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
+rectifyBtn.addEventListener('click', async () => {
   if (points.length !== 4) return;
   
-  const formData = new FormData(e.target);
-  formData.set('enforce_axes', e.target.enforce_axes.checked ? 'true' : 'false');
-  formData.set('points', JSON.stringify(points.map(p => ({ x: p.x, y: p.y }))));
+  const formData = new FormData();
+  const blob = await fetch(img.src).then(r => r.blob());
+  formData.append('image', blob, 'image.png');
+  formData.append('points', JSON.stringify(points.map(p => ({ x: p.x, y: p.y }))));
+  formData.append('width_mm', widthMm.value);
+  formData.append('height_mm', heightMm.value);
+  formData.append('dpi', dpi.value);
+  formData.append('margin_mm', marginMm.value);
+  formData.append('enforce_axes', enforceAxes.checked);
   
-  submitBtn.disabled = true;
-  submitBtn.textContent = 'Processing...';
+  rectifyBtn.disabled = true;
+  rectifyBtn.textContent = 'Processing...';
   rectifyResult.innerHTML = '';
   
   try {
@@ -895,127 +897,114 @@ document.getElementById('rectifyForm').addEventListener('submit', async (e) => {
     rectifyResult.innerHTML = `
       <div class="result-section">
         <h3>Rectified Image</h3>
-        <img src="${url}" alt="Rectified result" id="rectifiedImg">
+        <img src="${url}" alt="Rectified result">
         <div class="result-buttons">
-          <a href="${url}" download="rectified.png" class="btn-primary" style="display:inline-block; text-decoration:none;">
+          <button class="btn btn-primary" id="continueToAlignBtn">Continue to Alignment Step →</button>
+          <a href="${url}" download="rectified.png" class="btn" style="display:inline-block; text-decoration:none;">
             Download Rectified Image
           </a>
-          <button type="button" class="btn-success" id="startAlignBtn">+ Align Object Edge</button>
         </div>
       </div>
     `;
     
-    document.getElementById('startAlignBtn').addEventListener('click', startAlignment);
+    document.getElementById('continueToAlignBtn').addEventListener('click', () => {
+      document.getElementById('step2').classList.remove('hidden');
+      loadAlignStep();
+      document.getElementById('step2').scrollIntoView({ behavior: 'smooth' });
+    });
     
   } catch (err) {
     rectifyResult.innerHTML = `<div class="error"><strong>Error:</strong> ${err.message}</div>`;
   } finally {
-    submitBtn.disabled = false;
-    submitBtn.textContent = 'Rectify Image';
+    rectifyBtn.disabled = false;
+    rectifyBtn.textContent = 'Rectify Image';
   }
 });
 
-// ========== STEP 2: ALIGNMENT ==========
-const alignCanvas = document.getElementById('alignCanvas');
-const alignCtx = alignCanvas.getContext('2d');
+// --- Step 2: Alignment ---
 const alignCanvasContainer = document.getElementById('alignCanvasContainer');
 const alignCanvasWrapper = document.getElementById('alignCanvasWrapper');
+const alignCanvas = document.getElementById('alignCanvas');
+const alignCtx = alignCanvas.getContext('2d');
 const alignMarkersContainer = document.getElementById('alignMarkersContainer');
-const alignPointsDisplay = document.getElementById('alignPointsDisplay');
-const alignUndoBtn = document.getElementById('alignUndoBtn');
-const alignResetBtn = document.getElementById('alignResetBtn');
-const applyAlignBtn = document.getElementById('applyAlignBtn');
-const skipAlignBtn = document.getElementById('skipAlignBtn');
 const alignZoomInBtn = document.getElementById('alignZoomInBtn');
 const alignZoomOutBtn = document.getElementById('alignZoomOutBtn');
-const alignZoomInfo = document.getElementById('alignZoomInfo');
+const alignZoomDisplay = document.getElementById('alignZoomDisplay');
+const alignUndoBtn = document.getElementById('alignUndoBtn');
+const alignResetBtn = document.getElementById('alignResetBtn');
+const alignPointsDisplay = document.getElementById('alignPointsDisplay');
+const applyAlignBtn = document.getElementById('applyAlignBtn');
+const skipAlignBtn = document.getElementById('skipAlignBtn');
 const alignResult = document.getElementById('alignResult');
 
-let alignImg = new Image();
+let alignImg = null;
 let alignNaturalW = 0, alignNaturalH = 0;
 let alignPoints = [];
 let alignScale = 1.0;
+let alignMinScale = 1.0;
 let alignPanX = 0, alignPanY = 0;
 let alignIsDragging = false;
 let alignDragStartX = 0, alignDragStartY = 0;
 let alignDragMoved = false;
 
-const ALIGN_COLORS = ['#e53935', '#1e88e5'];
-let alignMinScale = 0.1; // Will be updated based on image fit
-
-function startAlignment() {
-  document.getElementById('step2').classList.remove('hidden');
-  document.getElementById('step2').scrollIntoView({ behavior: 'smooth' });
-  
-  alignPoints = [];
-  alignResult.innerHTML = '';
-  
+function loadAlignStep() {
   const url = URL.createObjectURL(rectifiedImageBlob);
+  alignImg = new Image();
   alignImg.onload = () => {
-    alignNaturalW = alignImg.naturalWidth;
-    alignNaturalH = alignImg.naturalHeight;
-    alignCanvasContainer.classList.add('active');
-    fitAlignImageToContainer();
+    alignNaturalW = alignImg.width;
+    alignNaturalH = alignImg.height;
+    
+    alignCanvas.width = alignNaturalW;
+    alignCanvas.height = alignNaturalH;
+    
+    const containerW = alignCanvasContainer.clientWidth;
+    const containerH = alignCanvasContainer.clientHeight;
+    const scaleW = containerW / alignNaturalW;
+    const scaleH = containerH / alignNaturalH;
+    alignMinScale = Math.min(scaleW, scaleH, 1.0);
+    
+    alignScale = alignMinScale;
+    alignPanX = (containerW - alignNaturalW * alignScale) / 2;
+    alignPanY = (containerH - alignNaturalH * alignScale) / 2;
+    
+    alignPoints = [];
+    
     drawAlignCanvas();
+    alignCanvasContainer.classList.add('active');
+    updateAlignPointsDisplay();
   };
   alignImg.src = url;
 }
 
-function fitAlignImageToContainer() {
-  const containerW = alignCanvasContainer.clientWidth;
-  const containerH = alignCanvasContainer.clientHeight;
-  const scaleW = containerW / alignNaturalW;
-  const scaleH = containerH / alignNaturalH;
-  const fitScale = Math.min(scaleW, scaleH, 1.0) * 0.9;
-  
-  // Set this as the minimum zoom level
-  alignMinScale = fitScale;
-  
-  alignScale = fitScale;
-  alignPanX = (containerW - alignNaturalW * alignScale) / 2;
-  alignPanY = (containerH - alignNaturalH * alignScale) / 2;
-}
-
-function updateAlignZoomInfo() {
-  alignZoomInfo.textContent = `Zoom: ${Math.round(alignScale * 100)}%`;
-}
-
 function drawAlignCanvas() {
-  if (!alignNaturalW) return;
-
-  alignCanvas.width = alignNaturalW;
-  alignCanvas.height = alignNaturalH;
+  if (!alignImg) return;
+  alignCtx.clearRect(0, 0, alignCanvas.width, alignCanvas.height);
+  alignCtx.drawImage(alignImg, 0, 0);
   
-  alignCanvasWrapper.style.width = alignNaturalW + 'px';
-  alignCanvasWrapper.style.height = alignNaturalH + 'px';
   alignCanvasWrapper.style.transform = `translate(${alignPanX}px, ${alignPanY}px) scale(${alignScale})`;
   
-  alignCtx.clearRect(0, 0, alignNaturalW, alignNaturalH);
-  alignCtx.drawImage(alignImg, 0, 0, alignNaturalW, alignNaturalH);
+  const zoomPct = Math.round(alignScale * 100);
+  alignZoomDisplay.textContent = `Zoom: ${zoomPct}%`;
   
   updateAlignMarkers();
-  updateAlignZoomInfo();
 }
 
 function updateAlignMarkers() {
   alignMarkersContainer.innerHTML = '';
+  alignMarkersContainer.style.width = `${alignNaturalW}px`;
+  alignMarkersContainer.style.height = `${alignNaturalH}px`;
   
-  alignPoints.forEach((p, i) => {
+  alignPoints.forEach((pt) => {
     const marker = document.createElement('div');
     marker.className = 'marker';
-    marker.style.left = p.x + 'px';
-    marker.style.top = p.y + 'px';
-    
-    marker.innerHTML = `
-      <div class="marker-outer"></div>
-      <div class="marker-inner" style="background-color: ${ALIGN_COLORS[i]}"></div>
-      <div class="marker-label">${i + 1}</div>
-    `;
-    
+    marker.style.left = `${pt.x}px`;
+    marker.style.top = `${pt.y}px`;
+    marker.innerHTML = '<div class="marker-outer"></div><div class="marker-inner"></div>';
     alignMarkersContainer.appendChild(marker);
   });
   
-  updateAlignPointsDisplay();
+  alignUndoBtn.disabled = (alignPoints.length === 0);
+  alignResetBtn.disabled = (alignPoints.length === 0);
 }
 
 function updateAlignPointsDisplay() {
